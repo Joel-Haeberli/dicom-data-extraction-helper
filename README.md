@@ -1,6 +1,6 @@
 # DICOM Data Extraction Helper
 
-During my civil service at the University Hospital Insel in Bern, I got the task of analyzing the anonymization process of patient data. To support this process and make analyses in the future easier, I implemented a few small helper tools, which can save a lot of time during the analysis of such profiles.
+During my civil service at the University Hospital Insel in Bern, I got the task of analyzing the anonymization process of patient data. To support this process and make analysis easier in the future, I implemented a few small helper tools, which can save a lot of time during the analysis of such profiles.
 
 The repository at the moment contains two tools: 
 
