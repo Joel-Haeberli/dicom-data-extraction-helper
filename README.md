@@ -194,11 +194,6 @@ Saves a comprehensive text report to full_report.txt.
 - Efficient for large datasets (tested with 1,106 DICOM files)
 - Uses `stop_before_pixels=True` to avoid loading large image arrays
 
-## Requirements
-
-- Python 3.7+
-- pydicom 2.4.0+
-
 
 
 
@@ -211,6 +206,26 @@ This tool parses and analyzes anonymization profiles from CSV data to help answe
 ### 1. Data Parsing
 - Parses `profiles.csv` into a structured matrix format
 - Operations: `remove`, `modify`, `custom`, `X` (not considered)
+
+The CSV must use the following pattern:
+
+```
+fieldname, profile 1, profile 2, ..., profile n 
+instance coercion datetime, remove, remove, ..., modify
+sop instance uid, custom, custom, ..., custom
+study date, X, modify, ..., remove
+series date, X, remove, ..., X
+acquisition date, remove, custom, ..., X
+content date, modify, modify, ..., X
+overlay date, remove, remove, ..., remove
+```
+
+The operations are defined as follows:
+
+1. remove: field is removed using the specified profile
+2. modify: field is modified using the specified profile
+3. custom: field can be customized by the enduser using the specified profile
+4. X: field is exported the specified profile
 
 ### 2. Mathematical Operations
 - **Set Difference**: Find differences between profiles using `A - B` operations
