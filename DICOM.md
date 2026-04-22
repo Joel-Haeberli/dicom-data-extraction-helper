@@ -176,6 +176,25 @@ Tags identifying medical professionals involved in the imaging study:
 - **Structured Reports**: DICOM SR objects (RDSR, CDSR) containing detailed findings, measurements, and annotations as separate DICOM instances.
 - **Presentation States**: Stored display preferences (window/level, annotations) as separate DICOM objects.
 
+## Overlay Data Tags (60xx Group)
+
+Overlay data enables storage of **2D graphic annotations** as separate bit planes that can be toggled on/off without modifying the original pixel data. The **60xx group** supports up to 16 overlay planes per image (groups 6000, 6002, 6004, ..., 601E). Each overlay plane uses the same element numbers within its respective group.
+
+| Tag | Name | VR | Description |
+|-----|------|----|-------------|
+| (60xx, 0010) | Overlay Rows | US | Height of overlay in pixels |
+| (60xx, 0011) | Overlay Columns | US | Width of overlay in pixels |
+| (60xx, 0020) | Overlay Planes | US | Number of overlay planes (frames) |
+| (60xx, 0040) | Overlay Description | LO | Human-readable label (e.g., "ROI #1", "Tumor Segmentation") |
+| (60xx, 0045) | Overlay Type | CS | Classification: ROI, TRACKING, ANNOTATION, GRAPHIC |
+| (60xx, 0050) | Overlay Subtype | LO | Further classification (e.g., "CONTOUR", "MEASUREMENT", "TEXT") |
+| (60xx, 0051) | Overlay Origin | US | X,Y position of the overlay origin (pixel coordinates) |
+| (60xx, 0052) | Image Frame Origin | US | Frame number where overlay originates (for multi-frame images) |
+| (60xx, 0060) | Overlay Plane Origin | US | Z-position (slice number) of overlay |
+| (60xx, 0080) | Overlay Bits Allocated | US | Number of bits per pixel in overlay data (typically 1 for binary) |
+| (60xx, 0082) | Overlay Bit Position | US | Bit position for overlay data within the pixel |
+| (60xx, 3000) | Overlay Data | OW | The actual overlay bit stream (1=ROI pixel, 0=background) |
+
 ## Importance
 
 DICOM headers enable **interoperability** between different vendors' equipment and PACS (Picture Archiving and Communication Systems), ensuring consistent image interpretation and data management across healthcare systems. They allow radiologists and software to access complete imaging context without relying on visual pixel data alone.
