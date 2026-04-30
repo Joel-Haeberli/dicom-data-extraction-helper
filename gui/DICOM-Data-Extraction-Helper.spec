@@ -22,6 +22,7 @@ a = Analysis(
         'PySide6.QtGui', 
         'PySide6.QtWidgets',
         'PySide6.QtSvg',
+        'PySide6.QtPrintSupport',
         'pydicom',
         'pydicom.dataset',
         'pydicom.tag',
@@ -51,10 +52,6 @@ tmp_ret = collect_all('numpy')
 a.datas += tmp_ret[0]
 a.binaries += tmp_ret[1]
 a.hiddenimports += tmp_ret[2]
-
-# Add the gui directory and its subdirectories
-# Note: paths are relative to the spec file location (gui/)
-a.datas += [('.', 'gui')]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
