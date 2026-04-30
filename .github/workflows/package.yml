@@ -26,7 +26,7 @@ jobs:
       - name: Package with PyInstaller (Windows)
         working-directory: gui
         run: |
-          pyinstaller --clean --onefile --windowed --name "DICOM-Data-Extraction-Helper" --icon=NONE DICOM-Data-Extraction-Helper.spec
+          pyinstaller --clean DICOM-Data-Extraction-Helper.spec
 
       - name: Create artifact name with timestamp
         id: artifact
@@ -61,7 +61,7 @@ jobs:
       - name: Package with PyInstaller (Linux)
         working-directory: gui
         run: |
-          pyinstaller --clean --onefile --windowed --name "DICOM-Data-Extraction-Helper" DICOM-Data-Extraction-Helper.spec
+          pyinstaller --clean DICOM-Data-Extraction-Helper.spec
 
       - name: Create artifact name with timestamp
         id: artifact
