@@ -10,7 +10,13 @@ a = Analysis(
     ['main.py'],
     pathex=pathex,
     binaries=[],
-    datas=[('*.md', '.'), ('LICENSE', '.'), ('../README.md', '.'), ('../LICENSE', '.'), ('../CONTRIBUTING.md', '.'), ('../DICOM.md', '.'), ('../MATH.md', '.')],
+    datas=[
+        ('../README.md', '.'),
+        ('../LICENSE', '.'),
+        ('../CONTRIBUTING.md', '.'),
+        ('../DICOM.md', '.'),
+        ('../MATH.md', '.'),
+    ],
     hiddenimports=[
         'PySide6.QtCore',
         'PySide6.QtGui', 
@@ -47,8 +53,8 @@ a.binaries += tmp_ret[1]
 a.hiddenimports += tmp_ret[2]
 
 # Add the gui directory and its subdirectories
-a.datas += [('gui', 'gui')]
-a.datas += [('gui/utils', 'gui/utils')]
+# Note: paths are relative to the spec file location (gui/)
+a.datas += [('.', 'gui')]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
