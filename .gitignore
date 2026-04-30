@@ -1,1 +1,29 @@
 _archive/
+*.png
+
+# Build artifacts
+/dist/
+/build/
+/gui/dist/
+/gui/build/
+.venv/
+venv/
+.PyInstaller/
+!gui/DICOM-Data-Extraction-Helper.spec
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# OS
+.DS_Store
+Thumbs.db
