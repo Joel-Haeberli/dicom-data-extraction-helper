@@ -4,10 +4,12 @@ _archive/
 # Build artifacts
 /dist/
 /build/
+/gui/dist/
+/gui/build/
 .venv/
 venv/
 .PyInstaller/
-*.spec
+!gui/DICOM-Data-Extraction-Helper.spec
 
 # IDE
 .idea/

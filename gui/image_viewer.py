@@ -137,7 +137,7 @@ class ImageViewer(QWidget):
         Args:
             state: Qt.CheckState (Checked or Unchecked)
         """
-        self._show_overlay = (state == Qt.Checked)
+        self._show_overlay = (state == Qt.Checked.value)
         self._update_display()
         self.overlay_toggled.emit(self._show_overlay)
     

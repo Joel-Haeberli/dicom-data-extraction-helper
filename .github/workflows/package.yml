@@ -1,0 +1,122 @@
+name: Package Application
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  package-windows:
+    name: Package for Windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install PyInstaller pydicom numpy PySide6
+
+      - name: Package with PyInstaller (Windows)
+        working-directory: gui
+        run: |
+          pyinstaller --clean --onefile --windowed --name "DICOM-Data-Extraction-Helper" --icon=NONE DICOM-Data-Extraction-Helper.spec
+
+      - name: Create artifact name with timestamp
+        id: artifact
+        run: |
+          $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+          echo "artifact_name=DICOM-Data-Extraction-Helper-Windows-$timestamp" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.artifact_name }}
+          path: gui/dist/*
+          retention-days: 30
+
+  package-linux:
+    name: Package for Linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install PyInstaller pydicom numpy PySide6
+
+      - name: Package with PyInstaller (Linux)
+        working-directory: gui
+        run: |
+          pyinstaller --clean --onefile --windowed --name "DICOM-Data-Extraction-Helper" DICOM-Data-Extraction-Helper.spec
+
+      - name: Create artifact name with timestamp
+        id: artifact
+        run: |
+          timestamp=$(date +"%Y%m%d-%H%M%S")
+          echo "artifact_name=DICOM-Data-Extraction-Helper-Linux-$timestamp" >> $GITHUB_OUTPUT
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.artifact_name }}
+          path: gui/dist/*
+          retention-days: 30
+
+  release:
+    name: Create Release
+    needs: [package-windows, package-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: DICOM-Data-Extraction-Helper-Windows-*
+          merge-multiple: true
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: DICOM-Data-Extraction-Helper-Linux-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -R artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.0.${{ github.run_number }}
+          name: Release v0.0.${{ github.run_number }}
+          body: |
+            Automated release built from commit ${{ github.sha }}
+            
+            **Assets:**
+            - Windows executable
+            - Linux executable
+          files: |
+            artifacts/**/*.exe
+            artifacts/**/DICOM-Data-Extraction-Helper
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

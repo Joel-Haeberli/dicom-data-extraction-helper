@@ -358,6 +358,9 @@ class ImageViewerWithMouseTracking(QWidget):
         self._overlay_color: tuple = (255, 0, 0)  # Default: red
         self._measurement_mode_enabled: bool = True  # Default: enabled
         self._cursor_window_size: int = 7  # Current cursor window size
+        self._last_cursor_x: int = -1  # Last cursor X position
+        self._last_cursor_y: int = -1  # Last cursor Y position
+        self._current_z: int = 0  # Current Z index (image number)
         self._setup_ui()
         self.setMouseTracking(True)
         
@@ -512,6 +515,10 @@ class ImageViewerWithMouseTracking(QWidget):
         """Set the current cursor window size."""
         self._cursor_window_size = size
     
+    def set_z_index(self, z: int):
+        """Set the current Z index (image number)."""
+        self._current_z = z
+    
     def set_measurement_mode(self, enabled: bool):
         """Set measurement mode enabled/disabled."""
         self._measurement_mode_enabled = enabled
@@ -577,7 +584,9 @@ class ImageViewerWithMouseTracking(QWidget):
     
     def _on_cursor_mode_toggled(self, state: int):
         """Handler for cursor mode toggle."""
-        self._cursor_mode_circle = (state == Qt.Checked)
+        # Qt.Checked is an enum, but state is an int (0=unchecked, 2=checked)
+        is_circle = (state == Qt.Checked.value)
+        self._cursor_mode_circle = is_circle
         # Emit signal to notify PixelArrayTable
         self.cursor_mode_changed.emit(self._cursor_mode_circle)
         # Update cursor shape on the label
@@ -590,7 +599,9 @@ class ImageViewerWithMouseTracking(QWidget):
     
     def _on_measurement_mode_toggled(self, state: int):
         """Handler for measurement mode toggle."""
-        self._measurement_mode_enabled = (state == Qt.Checked)
+        # Qt.Checked is an enum, but state is an int (0=unchecked, 2=checked)
+        enabled = (state == Qt.Checked.value)
+        self._measurement_mode_enabled = enabled
         # Emit signal to notify PixelArrayTable
         self.measurement_mode_changed.emit(self._measurement_mode_enabled)
         # When measurement mode is disabled, clear the cursor rectangle
@@ -689,6 +700,7 @@ class ImageViewerWithMouseTracking(QWidget):
                     self.measurement_captured.emit({
                         'x': img_pos_x,
                         'y': img_pos_y,
+                        'z': self._current_z,
                         'cursor_size': self._cursor_window_size,
                         'is_circle': self._cursor_mode_circle
                     })
@@ -1033,10 +1045,11 @@ Max: {hu_max:8.2f}"""
         """Handler for measurement capture from external viewer.
         
         Args:
-            data: Dictionary with x, y, cursor_size, is_circle
+            data: Dictionary with x, y, z, cursor_size, is_circle
         """
         x = data.get('x', 0)
         y = data.get('y', 0)
+        z = data.get('z', 0)
         cursor_size = data.get('cursor_size', 7)
         is_circle = data.get('is_circle', False)
         
@@ -1111,6 +1124,7 @@ Max: {hu_max:8.2f}"""
             measurement = {
                 'x': x,
                 'y': y,
+                'z': z,
                 'cursor_size': actual_cursor_size,
                 'is_circle': is_circle,
                 'raw_mean': raw_mean,
@@ -1547,6 +1561,15 @@ Max: {hu_max:8.2f}"""
         """
         if self._image_viewer is not None:
             self._image_viewer.set_overlay(overlay_qimage)
+    
+    def set_viewer_z_index(self, z: int):
+        """Set the Z index (image number) for the viewer.
+        
+        Args:
+            z: Current image index (0-based)
+        """
+        if self._image_viewer is not None:
+            self._image_viewer.set_z_index(z)
     
     def clear(self):
         """Clear the entire widget."""

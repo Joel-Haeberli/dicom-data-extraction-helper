@@ -156,9 +156,9 @@ class MainWindow(QMainWindow):
         
         # Measurements table (below metadata)
         self._measurements_table = QTableWidget(self)
-        self._measurements_table.setColumnCount(15)
+        self._measurements_table.setColumnCount(16)
         self._measurements_table.setHorizontalHeaderLabels([
-            "#", "X", "Y", "Size", "Form", 
+            "#", "Z", "X", "Y", "Size", "Form", 
             "Raw Mean", "Raw Std", "Raw Min", "Raw Max",
             "HU Mean", "HU Std", "HU Min", "HU Max",
             "Note", "Delete"
@@ -170,20 +170,21 @@ class MainWindow(QMainWindow):
         
         # Set column widths - Note column wider, others reasonable
         self._measurements_table.setColumnWidth(0, 40)  # #
-        self._measurements_table.setColumnWidth(1, 60)  # X
-        self._measurements_table.setColumnWidth(2, 60)  # Y
-        self._measurements_table.setColumnWidth(3, 60)  # Size
-        self._measurements_table.setColumnWidth(4, 80)  # Form
-        self._measurements_table.setColumnWidth(5, 80)  # Raw Mean
-        self._measurements_table.setColumnWidth(6, 80)  # Raw Std
-        self._measurements_table.setColumnWidth(7, 80)  # Raw Min
-        self._measurements_table.setColumnWidth(8, 80)  # Raw Max
-        self._measurements_table.setColumnWidth(9, 80)  # HU Mean
-        self._measurements_table.setColumnWidth(10, 80)  # HU Std
-        self._measurements_table.setColumnWidth(11, 80)  # HU Min
-        self._measurements_table.setColumnWidth(12, 80)  # HU Max
-        self._measurements_table.setColumnWidth(13, 300)  # Note - wider
-        self._measurements_table.setColumnWidth(14, 60)  # Delete
+        self._measurements_table.setColumnWidth(1, 40)  # Z (new)
+        self._measurements_table.setColumnWidth(2, 40)  # X
+        self._measurements_table.setColumnWidth(3, 40)  # Y
+        self._measurements_table.setColumnWidth(4, 60)  # Size
+        self._measurements_table.setColumnWidth(5, 80)  # Form
+        self._measurements_table.setColumnWidth(6, 80)  # Raw Mean
+        self._measurements_table.setColumnWidth(7, 80)  # Raw Std
+        self._measurements_table.setColumnWidth(8, 80)  # Raw Min
+        self._measurements_table.setColumnWidth(9, 80)  # Raw Max
+        self._measurements_table.setColumnWidth(10, 80)  # HU Mean
+        self._measurements_table.setColumnWidth(11, 80)  # HU Std
+        self._measurements_table.setColumnWidth(12, 80)  # HU Min
+        self._measurements_table.setColumnWidth(13, 80)  # HU Max
+        self._measurements_table.setColumnWidth(14, 300)  # Note - wider
+        self._measurements_table.setColumnWidth(15, 60)  # Delete
         
         # Export button for measurements
         self._export_measurements_button = QPushButton("Export Measurements (CSV)", self)
@@ -273,9 +274,9 @@ class MainWindow(QMainWindow):
             # Load DICOM files
             self._dicom_loader.load_directory(directory)
             
-            # Get all image files and sort by Z coordinate (ascending: lowest Z first)
+            # Get all image files and sort by Z coordinate (descending: highest Z first)
             self._image_files = [f for f in self._dicom_loader.dicom_files if f.is_image]
-            self._image_files.sort(key=lambda x: x.image_coordinates.get('z', float('-inf')))
+            self._image_files.sort(key=lambda x: x.image_coordinates.get('z', float('inf')), reverse=True)
             
             if not self._image_files:
                 QMessageBox.information(
@@ -415,18 +416,22 @@ class MainWindow(QMainWindow):
         total = len(self._image_files)
         current = self._current_image_index + 1
         
-        # Update external viewer's navigation if it exists
-        viewer = None
+        # Update external viewer's navigation and Z index if it exists
+        pixel_table = None
         if (hasattr(self, '_image_tabs') and self._image_tabs is not None and
-            hasattr(self._image_tabs, 'pixel_array_table') and
-            self._image_tabs.pixel_array_table is not None and
-            hasattr(self._image_tabs.pixel_array_table, '_image_viewer')):
-            viewer = self._image_tabs.pixel_array_table._image_viewer
+            hasattr(self._image_tabs, 'pixel_array_table')):
+            pixel_table = self._image_tabs.pixel_array_table
         
-        if viewer is not None:
-            viewer.set_navigation(current, total)
-            viewer._prev_button.setEnabled(self._current_image_index > 0)
-            viewer._next_button.setEnabled(self._current_image_index < total - 1)
+        if pixel_table is not None:
+            # Update Z index in viewer
+            pixel_table.set_viewer_z_index(self._current_image_index)
+            
+            # Update navigation UI in viewer
+            viewer = pixel_table._image_viewer
+            if viewer is not None:
+                viewer.set_navigation(current, total)
+                viewer._prev_button.setEnabled(self._current_image_index > 0)
+                viewer._next_button.setEnabled(self._current_image_index < total - 1)
     
     def _on_add_measurement(self, measurement: dict):
         """Handler for adding a new measurement.
@@ -448,8 +453,8 @@ class MainWindow(QMainWindow):
             row: Row index of the changed cell
             column: Column index of the changed cell
         """
-        # Only handle changes in the Note column (column 13)
-        if column == 13 and 0 <= row < len(self._measurements):
+        # Only handle changes in the Note column (column 14)
+        if column == 14 and 0 <= row < len(self._measurements):
             item = self._measurements_table.item(row, column)
             if item is not None:
                 # Update the note in the measurement dictionary
@@ -463,8 +468,8 @@ class MainWindow(QMainWindow):
             row: Row index of the clicked cell
             column: Column index of the clicked cell
         """
-        # Only handle clicks in the Delete column (column 14)
-        if column == 14 and 0 <= row < len(self._measurements):
+        # Only handle clicks in the Delete column (column 15)
+        if column == 15 and 0 <= row < len(self._measurements):
             # Remove the measurement from the list
             self._measurements.pop(row)
             # Update the table
@@ -509,6 +514,7 @@ class MainWindow(QMainWindow):
                 for i, m in enumerate(self._measurements):
                     row = [
                         str(i + 1),  # Index
+                        str(m.get('z', '')),  # Z index
                         str(m.get('x', '')),
                         str(m.get('y', '')),
                         str(m.get('cursor_size', '')),
@@ -542,53 +548,56 @@ class MainWindow(QMainWindow):
             # Column 0: Index
             self._measurements_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
             
-            # Column 1: X position
-            self._measurements_table.setItem(i, 1, QTableWidgetItem(str(m.get('x', 0))))
+            # Column 1: Z index
+            self._measurements_table.setItem(i, 1, QTableWidgetItem(str(m.get('z', 0))))
             
-            # Column 2: Y position
-            self._measurements_table.setItem(i, 2, QTableWidgetItem(str(m.get('y', 0))))
+            # Column 2: X position
+            self._measurements_table.setItem(i, 2, QTableWidgetItem(str(m.get('x', 0))))
             
-            # Column 3: Cursor Size
-            self._measurements_table.setItem(i, 3, QTableWidgetItem(str(m.get('cursor_size', 0))))
+            # Column 3: Y position
+            self._measurements_table.setItem(i, 3, QTableWidgetItem(str(m.get('y', 0))))
             
-            # Column 4: Form (Circle/Rectangle)
+            # Column 4: Cursor Size
+            self._measurements_table.setItem(i, 4, QTableWidgetItem(str(m.get('cursor_size', 0))))
+            
+            # Column 5: Form (Circle/Rectangle)
             form = "Circle" if m.get('is_circle', False) else "Rectangle"
-            self._measurements_table.setItem(i, 4, QTableWidgetItem(form))
+            self._measurements_table.setItem(i, 5, QTableWidgetItem(form))
             
-            # Column 5: Raw Mean
-            self._measurements_table.setItem(i, 5, QTableWidgetItem(f"{m.get('raw_mean', 0):.2f}"))
+            # Column 6: Raw Mean
+            self._measurements_table.setItem(i, 6, QTableWidgetItem(f"{m.get('raw_mean', 0):.2f}"))
             
-            # Column 6: Raw Std
-            self._measurements_table.setItem(i, 6, QTableWidgetItem(f"{m.get('raw_std', 0):.2f}"))
+            # Column 7: Raw Std
+            self._measurements_table.setItem(i, 7, QTableWidgetItem(f"{m.get('raw_std', 0):.2f}"))
             
-            # Column 7: Raw Min
-            self._measurements_table.setItem(i, 7, QTableWidgetItem(f"{m.get('raw_min', 0):.2f}"))
+            # Column 8: Raw Min
+            self._measurements_table.setItem(i, 8, QTableWidgetItem(f"{m.get('raw_min', 0):.2f}"))
             
-            # Column 8: Raw Max
-            self._measurements_table.setItem(i, 8, QTableWidgetItem(f"{m.get('raw_max', 0):.2f}"))
+            # Column 9: Raw Max
+            self._measurements_table.setItem(i, 9, QTableWidgetItem(f"{m.get('raw_max', 0):.2f}"))
             
-            # Column 9: HU Mean
-            self._measurements_table.setItem(i, 9, QTableWidgetItem(f"{m.get('hu_mean', 0):.2f}"))
+            # Column 10: HU Mean
+            self._measurements_table.setItem(i, 10, QTableWidgetItem(f"{m.get('hu_mean', 0):.2f}"))
             
-            # Column 10: HU Std
-            self._measurements_table.setItem(i, 10, QTableWidgetItem(f"{m.get('hu_std', 0):.2f}"))
+            # Column 11: HU Std
+            self._measurements_table.setItem(i, 11, QTableWidgetItem(f"{m.get('hu_std', 0):.2f}"))
             
-            # Column 11: HU Min
-            self._measurements_table.setItem(i, 11, QTableWidgetItem(f"{m.get('hu_min', 0):.2f}"))
+            # Column 12: HU Min
+            self._measurements_table.setItem(i, 12, QTableWidgetItem(f"{m.get('hu_min', 0):.2f}"))
             
-            # Column 12: HU Max
-            self._measurements_table.setItem(i, 12, QTableWidgetItem(f"{m.get('hu_max', 0):.2f}"))
+            # Column 13: HU Max
+            self._measurements_table.setItem(i, 13, QTableWidgetItem(f"{m.get('hu_max', 0):.2f}"))
             
-            # Column 13: Note (editable)
+            # Column 14: Note (editable)
             note_item = QTableWidgetItem(m.get('note', ''))
             note_item.setFlags(note_item.flags() | Qt.ItemFlag.ItemIsEditable)
-            self._measurements_table.setItem(i, 13, note_item)
+            self._measurements_table.setItem(i, 14, note_item)
             
-            # Column 14: Delete button
+            # Column 15: Delete button
             delete_item = QTableWidgetItem("Delete")
             delete_item.setForeground(QColor(200, 0, 0))
             delete_item.setToolTip("Click to delete this measurement")
-            self._measurements_table.setItem(i, 14, delete_item)
+            self._measurements_table.setItem(i, 15, delete_item)
     
 
     
