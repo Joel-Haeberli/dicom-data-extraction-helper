@@ -517,6 +517,8 @@ class ImageViewerWithMouseTracking(QWidget):
         self._measurement_mode_enabled = enabled
         if self._measurement_toggle is not None:
             self._measurement_toggle.setChecked(enabled)
+        # Note: Don't emit signal here to avoid infinite loop
+        # The signal is emitted from _on_measurement_mode_toggled when user interacts
     
     def set_stats_text(self, text: str):
         """Set the statistics display text."""
@@ -770,6 +772,9 @@ class PixelArrayTable(QWidget):
         # Measurement mode state
         self._measurement_mode_enabled: bool = True
         
+        # Cursor mode state (circle or rectangle)
+        self._cursor_mode_circle: bool = True  # Default to circle
+        
         # Setup UI
         self._setup_ui()
     
@@ -984,6 +989,18 @@ Max: {hu_max:8.2f}"""
     
     def _on_viewer_cursor_mode_changed(self, is_circle: bool):
         """Handler for cursor mode change from external viewer."""
+        # Store the cursor mode state
+        self._cursor_mode_circle = is_circle
+        
+        # Update the viewer's cursor rectangle with new shape
+        if (self._image_viewer is not None and 
+            hasattr(self._image_viewer, '_image_label') and 
+            self._image_viewer._image_label is not None and
+            hasattr(self._image_viewer._image_label, '_cursor_rect') and
+            self._image_viewer._image_label._cursor_rect is not None):
+            x, y, w, h = self._image_viewer._image_label._cursor_rect
+            self._image_viewer._image_label.set_cursor_rect(x, y, w, h, is_circle)
+        
         # Update highlight region and statistics
         self._update_highlight_region()
         if self._pixel_array is not None and self._dataset is not None:
@@ -996,7 +1013,17 @@ Max: {hu_max:8.2f}"""
         # When measurement mode is re-enabled, restore the cursor position if we have one
         if enabled and self._last_cursor_x >= 0 and self._last_cursor_y >= 0:
             # Trigger a cursor position update to sync table window with cursor
-            self._on_cursor_position_changed(self._last_cursor_x, self._last_cursor_y)
+            # Note: _on_cursor_position_changed checks both _pixel_array and _measurement_mode_enabled
+            # Since we just set _measurement_mode_enabled=True, we need to also check _pixel_array
+            if self._pixel_array is not None:
+                self._on_cursor_position_changed(self._last_cursor_x, self._last_cursor_y)
+            else:
+                # No pixel array loaded, just update the cursor rectangle on the viewer
+                if self._image_viewer is not None:
+                    self._image_viewer.set_cursor_rect(
+                        self._last_cursor_x, self._last_cursor_y,
+                        self._cursor_window_size, self._cursor_window_size
+                    )
         else:
             # Just update the highlight region
             self._update_highlight_region()
@@ -1398,8 +1425,14 @@ Max: {hu_max:8.2f}"""
                 self._image_viewer.set_overlay_color(self._overlay_color if hasattr(self, '_overlay_color') else (255, 0, 0))
                 # Set initial cursor window size
                 self._image_viewer.set_cursor_window_size(self._cursor_window_size)
+                # Set initial cursor mode
+                self._image_viewer.set_cursor_mode_circle(self._cursor_mode_circle)
                 # Set initial measurement mode
                 self._image_viewer.set_measurement_mode(self._measurement_mode_enabled)
+                # Sync last cursor position from PixelArrayTable to viewer
+                if self._last_cursor_x >= 0 and self._last_cursor_y >= 0:
+                    self._image_viewer._last_cursor_x = self._last_cursor_x
+                    self._image_viewer._last_cursor_y = self._last_cursor_y
                 
                 # Create a simple window (no parent = top-level window)
                 self._image_viewer_window = QWidget(None)
@@ -1536,6 +1569,7 @@ Max: {hu_max:8.2f}"""
         self._has_hu = False
         self._dataset = None
         self._measurement_mode_enabled = True
+        self._cursor_mode_circle = True  # Reset to circle mode
         
         # Clear external viewer
         if self._image_viewer is not None:
