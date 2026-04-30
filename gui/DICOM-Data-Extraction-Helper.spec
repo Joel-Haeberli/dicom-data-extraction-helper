@@ -1,6 +1,4 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
-
 block_cipher = None
 
 # Add the parent directory to the path so we can import from the project root
@@ -11,11 +9,11 @@ a = Analysis(
     pathex=pathex,
     binaries=[],
     datas=[
-        ('../README.md', '.'),
-        ('../LICENSE', '.'),
-        ('../CONTRIBUTING.md', '.'),
-        ('../DICOM.md', '.'),
-        ('../MATH.md', '.'),
+        ('../README.md', '.', 'DATA'),
+        ('../LICENSE', '.', 'DATA'),
+        ('../CONTRIBUTING.md', '.', 'DATA'),
+        ('../DICOM.md', '.', 'DATA'),
+        ('../MATH.md', '.', 'DATA'),
     ],
     hiddenimports=[
         'PySide6.QtCore',
@@ -41,17 +39,6 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
-
-# Collect all necessary data from pydicom and numpy
-tmp_ret = collect_all('pydicom')
-a.datas += tmp_ret[0]
-a.binaries += tmp_ret[1]
-a.hiddenimports += tmp_ret[2]
-
-tmp_ret = collect_all('numpy')
-a.datas += tmp_ret[0]
-a.binaries += tmp_ret[1]
-a.hiddenimports += tmp_ret[2]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
