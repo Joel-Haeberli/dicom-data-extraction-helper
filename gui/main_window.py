@@ -15,7 +15,8 @@ import csv
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QPushButton, QLabel, QSpinBox,
     QHBoxLayout, QVBoxLayout, QFileDialog, QMessageBox,
-    QColorDialog, QCheckBox, QTableWidget, QTableWidgetItem
+    QColorDialog, QCheckBox, QTableWidget, QTableWidgetItem,
+    QStackedWidget, QDockWidget, QDialog
 )
 from PySide6.QtCore import Qt, Signal, QSize, QEvent
 from PySide6.QtGui import QIcon, QWheelEvent, QColor
@@ -30,6 +31,9 @@ from gui.utils.image_utils import (
     overlay_to_qimage, extract_overlay_with_origin,
     get_original_size,
 )
+from gui.utils.pacs_client import PACSClient, PACSConfig, ConnectionStatus
+from gui.pacs_connection_dialog import PACSConnectionDialog
+from gui.pacs_browser import PACSBrowser
 
 
 class MainWindow(QMainWindow):
@@ -63,6 +67,11 @@ class MainWindow(QMainWindow):
         self._measurements: List[dict] = []  # List of measurement entries
         self._image_viewer_window = None  # Reference to external image viewer window
         
+        # PACS state
+        self._pacs_client = PACSClient()
+        self._pacs_browser: Optional[PACSBrowser] = None
+        self._pacs_dock: Optional[QDockWidget] = None
+        
         # Create UI
         self._create_widgets()
         self._setup_layout()
@@ -79,6 +88,9 @@ class MainWindow(QMainWindow):
         self._image_tabs.pixel_array_table.add_measurement_requested.connect(self._on_add_measurement)
         self._image_tabs.pixel_array_table.viewer_reopened.connect(self._on_viewer_reopened)
         
+        # Setup PACS client callbacks
+        self._pacs_client.set_status_change_callback(self._on_pacs_status_change)
+        
         # Initial state
         self._update_current_selection()
         
@@ -86,7 +98,7 @@ class MainWindow(QMainWindow):
         self.setAttribute(Qt.WA_DeleteOnClose)
     
     def closeEvent(self, event):
-        """Close event handler - closes external image viewer window."""
+        """Close event handler - closes external image viewer window and PACS resources."""
         # Close external image viewer if it exists
         if (hasattr(self, '_image_tabs') and self._image_tabs is not None and
             hasattr(self._image_tabs, 'pixel_array_table') and
@@ -95,6 +107,31 @@ class MainWindow(QMainWindow):
             self._image_tabs.pixel_array_table._image_viewer_window is not None):
             self._image_tabs.pixel_array_table._image_viewer_window.close()
             self._image_tabs.pixel_array_table._image_viewer_window = None
+        
+        # Clean up PACS resources (disconnect callbacks first to avoid issues)
+        self._pacs_client._on_status_change = None
+        self._pacs_client._on_query_result = None
+        self._pacs_client._on_retrieval_complete = None
+        
+        if self._pacs_browser:
+            try:
+                self._pacs_browser.cleanup()
+            except Exception:
+                pass
+            self._pacs_browser = None
+        
+        if self._pacs_dock:
+            try:
+                self._pacs_dock.deleteLater()
+            except Exception:
+                pass
+            self._pacs_dock = None
+        
+        try:
+            self._pacs_client.cleanup()
+        except Exception:
+            pass
+        
         event.accept()
     
     def _on_viewer_reopened(self):
@@ -129,6 +166,11 @@ class MainWindow(QMainWindow):
         # Top controls
         self._load_button = QPushButton("Load DICOM Directory...", self)
         self._load_button.setToolTip("Select a directory containing DICOM files")
+        
+        # PACS button
+        self._pacs_button = QPushButton("PACS", self)
+        self._pacs_button.setToolTip("Connect to PACS and query studies")
+        self._pacs_button.setCheckable(True)
         
         # Show image window button
         self._show_image_window_button = QPushButton("Show Image Window", self)
@@ -206,9 +248,10 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(8)
         
-        # Top row: Load button + Show Image Window button + current selection
+        # Top row: Load button + PACS button + Show Image Window button + current selection
         top_layout = QHBoxLayout()
         top_layout.addWidget(self._load_button, 0)
+        top_layout.addWidget(self._pacs_button, 0)
         top_layout.addWidget(self._show_image_window_button, 0)
         top_layout.addWidget(self._current_selection_label, 1)
         top_layout.addStretch(1)
@@ -237,8 +280,116 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         """Connect signals between widgets."""
         self._load_button.clicked.connect(self._on_load_button_clicked)
+        self._pacs_button.clicked.connect(self._on_pacs_button_clicked)
         # Navigation and overlay controls are now in external image viewer
         # Connections will be made when viewer is created
+    
+    def _on_pacs_button_clicked(self, checked: bool):
+        """
+        Handler for PACS button click.
+        Shows the PACS connection dialog if not connected, or hides the PACS browser if connected.
+        """
+        if checked:
+            # Show connection dialog
+            self._show_pacs_connection_dialog()
+        else:
+            # Hide PACS browser
+            self._hide_pacs_browser()
+    
+    def _on_pacs_status_change(self, status: ConnectionStatus, message: str):
+        """
+        Handler for PACS client status changes.
+        Updates UI to reflect connection status.
+        """
+        if status == ConnectionStatus.CONNECTED:
+            self._pacs_button.setChecked(True)
+            self._pacs_button.setText("PACS (Connected)")
+            self._pacs_button.setStyleSheet("background-color: #c8e6c9;")
+        elif status == ConnectionStatus.CONNECTING:
+            self._pacs_button.setText("PACS (Connecting...)")
+            self._pacs_button.setStyleSheet("background-color: #bbdefb;")
+        elif status == ConnectionStatus.ERROR:
+            self._pacs_button.setChecked(False)
+            self._pacs_button.setText("PACS (Error)")
+            self._pacs_button.setStyleSheet("background-color: #ffcdd2;")
+        else:
+            self._pacs_button.setChecked(False)
+            self._pacs_button.setText("PACS")
+            self._pacs_button.setStyleSheet("")
+    
+    def _show_pacs_connection_dialog(self):
+        """Show the PACS connection dialog."""
+        dialog = PACSConnectionDialog(self._pacs_client, self)
+        dialog.connection_successful.connect(self._on_pacs_connected)
+        
+        if dialog.exec() == QDialog.Accepted:
+            # Connection was successful
+            self._on_pacs_connected(dialog.get_config())
+        else:
+            # User cancelled, uncheck the button
+            self._pacs_button.setChecked(False)
+    
+    def _on_pacs_connected(self, config: PACSConfig):
+        """
+        Handler for successful PACS connection.
+        Shows the PACS browser dock widget.
+        """
+        self._pacs_button.setChecked(True)
+        self._show_pacs_browser()
+    
+    def _show_pacs_browser(self):
+        """Show the PACS browser as a dock widget."""
+        if self._pacs_browser is None:
+            # Create PACS browser
+            self._pacs_browser = PACSBrowser(self._pacs_client, self)
+            self._pacs_browser.files_retrieved.connect(self._on_pacs_files_retrieved)
+            
+            # Create dock widget
+            self._pacs_dock = QDockWidget("PACS Browser", self)
+            self._pacs_dock.setWidget(self._pacs_browser)
+            self._pacs_dock.setFeatures(
+                QDockWidget.DockWidgetFeature.DockWidgetMovable |
+                QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            )
+            
+            # Add to main window
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._pacs_dock)
+            
+            # Connect dock visibility to button state
+            self._pacs_dock.visibilityChanged.connect(self._on_pacs_dock_visibility_changed)
+        
+        self._pacs_dock.show()
+        self._pacs_dock.raise_()
+    
+    def _hide_pacs_browser(self):
+        """Hide the PACS browser dock widget."""
+        if self._pacs_dock:
+            self._pacs_dock.hide()
+        self._pacs_button.setChecked(False)
+        self._pacs_button.setText("PACS")
+        self._pacs_button.setStyleSheet("")
+    
+    def _on_pacs_dock_visibility_changed(self, visible: bool):
+        """Handler for PACS dock visibility changes."""
+        if not visible:
+            self._pacs_button.setChecked(False)
+    
+    def _on_pacs_files_retrieved(self, file_paths: List[Path]):
+        """
+        Handler for files retrieved from PACS.
+        Loads the retrieved files into the application.
+        """
+        if file_paths:
+            # Use the directory of the first file
+            directory = file_paths[0].parent
+            self._load_dicom_directory(directory)
+            
+            # Show success message
+            QMessageBox.information(
+                self,
+                "Files Loaded",
+                f"Loaded {len(file_paths)} DICOM files from PACS.\n\nDirectory: {directory}"
+            )
     
     def _on_load_button_clicked(self):
         """
