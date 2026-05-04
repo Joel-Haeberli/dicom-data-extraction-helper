@@ -136,10 +136,22 @@ class PixelArrayModel(QAbstractTableModel):
                     radius = self._circle_diameter / 2
                     if dx * dx + dy * dy <= radius * radius:
                         # Cell is inside circle
-                        return QBrush(QColor(200, 230, 201))  # Light green
+                        # Check if this is the center cell for special highlighting
+                        if abs(dx) <= 0.5 and abs(dy) <= 0.5:
+                            # Center cell - bright cyan for dark mode
+                            return QBrush(QColor(0, 255, 255, 180))
+                        # Regular circle cell - semi-transparent blue
+                        return QBrush(QColor(0, 100, 255, 80))
                 else:
                     # Rectangle mode: all cells in window are used
-                    return QBrush(QColor(200, 230, 201))  # Light green
+                    # Check if this is the center cell
+                    center_col = self._highlight_window_cols // 2
+                    center_row = self._highlight_window_rows // 2
+                    if col == center_col and row == center_row:
+                        # Center cell - bright cyan for dark mode
+                        return QBrush(QColor(0, 255, 255, 180))
+                    # Regular rectangle cell - semi-transparent blue
+                    return QBrush(QColor(0, 100, 255, 80))
         
         return None
     
@@ -315,18 +327,34 @@ class ImageLabelWithOverlay(QLabel):
             label_x = img_x + x
             label_y = img_y + y
             
-            painter.setPen(QColor(255, 0, 0, 200))  # Red border with some transparency
-            painter.setBrush(QColor(255, 255, 0, 60))  # Semi-transparent yellow fill
+            # Colors for dark mode - cyan border with semi-transparent blue fill
+            border_color = QColor(0, 255, 255, 200)  # Cyan border
+            fill_color = QColor(0, 100, 255, 60)  # Semi-transparent blue fill
+            center_color = QColor(255, 255, 0, 255)  # Bright yellow for center marker
+            
+            painter.setPen(border_color)
+            painter.setBrush(fill_color)
+            
+            # Calculate center for both drawing and marker
+            center_x = label_x + w // 2
+            center_y = label_y + h // 2
             
             if self._cursor_is_circle:
-                # Draw circle centered at (label_x + w/2, label_y + h/2) with diameter = min(w, h)
-                center_x = label_x + w // 2
-                center_y = label_y + h // 2
+                # Draw circle centered at (center_x, center_y) with diameter = min(w, h)
                 diameter = min(w, h)
                 painter.drawEllipse(center_x - diameter // 2, center_y - diameter // 2, diameter, diameter)
             else:
                 # Draw rectangle
                 painter.drawRect(label_x, label_y, w, h)
+            
+            # Draw center marker - small crosshair
+            marker_size = 5
+            painter.setPen(center_color)
+            painter.setBrush(Qt.NoBrush)  # No fill for center marker
+            # Horizontal line
+            painter.drawLine(center_x - marker_size, center_y, center_x + marker_size, center_y)
+            # Vertical line
+            painter.drawLine(center_x, center_y - marker_size, center_x, center_y + marker_size)
         
         painter.end()
 
@@ -355,7 +383,7 @@ class ImageViewerWithMouseTracking(QWidget):
         self._pixmap: Optional[QPixmap] = None
         self._stats_label: Optional[QLabel] = None
         self._cursor_mode_circle: bool = True  # Default to circle
-        self._overlay_color: tuple = (255, 0, 0)  # Default: red
+        self._overlay_color: tuple = (0, 255, 255)  # Default: cyan (better for dark mode)
         self._measurement_mode_enabled: bool = True  # Default: enabled
         self._cursor_window_size: int = 7  # Current cursor window size
         self._last_cursor_x: int = -1  # Last cursor X position
@@ -675,8 +703,9 @@ class ImageViewerWithMouseTracking(QWidget):
             self._measurement_mode_enabled and 
             self._image is not None and 
             self._image_label.pixmap() is not None):
-            # Get mouse position relative to the label
-            pos = event.position().toPoint()
+            # Get global mouse position and map to image label
+            global_pos = event.globalPosition().toPoint()
+            label_pos = self._image_label.mapFromGlobal(global_pos)
             
             # Get label and pixmap dimensions
             label_rect = self._image_label.rect()
@@ -684,18 +713,19 @@ class ImageViewerWithMouseTracking(QWidget):
             if pixmap is not None:
                 pixmap_rect = pixmap.rect()
                 
-                # Calculate the actual image position within the label
+                # Calculate the actual image position within the label (centered)
                 img_x = (label_rect.width() - pixmap_rect.width()) // 2
                 img_y = (label_rect.height() - pixmap_rect.height()) // 2
                 
                 # Check if mouse is over the actual image area
-                if (img_x <= pos.x() < img_x + pixmap_rect.width() and
-                    img_y <= pos.y() < img_y + pixmap_rect.height()):
-                    # Convert to image coordinates
-                    img_pos_x = pos.x() - img_x
-                    img_pos_y = pos.y() - img_y
+                if (img_x <= label_pos.x() < img_x + pixmap_rect.width() and
+                    img_y <= label_pos.y() < img_y + pixmap_rect.height()):
+                    # Convert to image coordinates (within the pixmap)
+                    img_pos_x = label_pos.x() - img_x
+                    img_pos_y = label_pos.y() - img_y
                     
                     # Emit measurement captured signal with position and mode
+                    # Uses current window (set by mouse movement via eventFilter)
                     # PixelArrayTable will calculate statistics and emit full measurement
                     self.measurement_captured.emit({
                         'x': img_pos_x,
@@ -730,6 +760,111 @@ class PixelArrayTable(QWidget):
     - next_image_requested(): Emitted when mouse wheel scrolls forward
     - prev_image_requested(): Emitted when mouse wheel scrolls backward
     """
+
+    @staticmethod
+    def calculate_region_stats(pixel_array: np.ndarray, win_x: int, win_y: int, win_w: int, win_h: int,
+                               is_circle: bool = False, slope: float = 1.0,
+                               intercept: float = 0.0, has_hu: bool = False) -> dict:
+        """
+        Calculate Raw and HU statistics for a region in a pixel array.
+        
+        This is a consolidated function used by both the stats box and measurement capture
+        to ensure consistent calculations.
+        
+        Args:
+            pixel_array: 2D numpy array of pixel values
+            win_x: Window x position (column start)
+            win_y: Window y position (row start)
+            win_w: Window width (columns)
+            win_h: Window height (rows)
+            is_circle: If True, only use pixels within a circle
+            slope: Rescale slope for HU conversion
+            intercept: Rescale intercept for HU conversion
+            has_hu: Whether HU conversion is available and should be applied
+            
+        Returns:
+            Dictionary with keys: 'pixel_count', 'raw_mean', 'raw_std', 'raw_min', 'raw_max',
+            'hu_mean', 'hu_std', 'hu_min', 'hu_max' (HU values are 0 if not has_hu)
+        """
+        # Clamp window to array bounds
+        if win_w <= 0 or win_h <= 0:
+            return {
+                'pixel_count': 0,
+                'raw_mean': 0.0, 'raw_std': 0.0, 'raw_min': 0.0, 'raw_max': 0.0,
+                'hu_mean': 0.0, 'hu_std': 0.0, 'hu_min': 0.0, 'hu_max': 0.0
+            }
+        
+        # Clamp window to stay within array bounds
+        rows, cols = pixel_array.shape
+        win_x = max(0, min(win_x, cols - win_w))
+        win_y = max(0, min(win_y, rows - win_h))
+        win_w = min(win_w, cols - win_x)
+        win_h = min(win_h, rows - win_y)
+        
+        if win_w <= 0 or win_h <= 0:
+            return {
+                'pixel_count': 0,
+                'raw_mean': 0.0, 'raw_std': 0.0, 'raw_min': 0.0, 'raw_max': 0.0,
+                'hu_mean': 0.0, 'hu_std': 0.0, 'hu_min': 0.0, 'hu_max': 0.0
+            }
+        
+        # Extract region
+        region = pixel_array[win_y:win_y + win_h, win_x:win_x + win_w]
+        
+        if is_circle and win_w > 0 and win_h > 0:
+            # Circle mode: only use pixels within the circle
+            center_x = win_w / 2.0
+            center_y = win_h / 2.0
+            diameter = min(win_w, win_h)
+            radius = diameter / 2.0
+            radius_sq = radius * radius
+            
+            # Create circular mask using pixel center coordinates
+            yy, xx = np.ogrid[:win_h, :win_w]
+            mask = (xx + 0.5 - center_x)**2 + (yy + 0.5 - center_y)**2 <= radius_sq
+            
+            # Extract pixels within circle
+            circle_pixels = region[mask]
+            pixel_count = len(circle_pixels)
+            
+            if pixel_count > 0:
+                raw_mean = float(np.mean(circle_pixels))
+                raw_std = float(np.std(circle_pixels))
+                raw_min = float(np.min(circle_pixels))
+                raw_max = float(np.max(circle_pixels))
+            else:
+                raw_mean = raw_std = raw_min = raw_max = 0.0
+        else:
+            # Rectangle mode: use all pixels in the region
+            pixel_count = region.size
+            
+            if pixel_count > 0:
+                raw_mean = float(np.mean(region))
+                raw_std = float(np.std(region))
+                raw_min = float(np.min(region))
+                raw_max = float(np.max(region))
+            else:
+                raw_mean = raw_std = raw_min = raw_max = 0.0
+        
+        # Initialize HU values
+        hu_mean = hu_std = hu_min = hu_max = 0.0
+        
+        if has_hu and pixel_count > 0:
+            if is_circle:
+                hu_pixels = circle_pixels.astype(np.float64) * slope + intercept
+            else:
+                hu_pixels = region.astype(np.float64) * slope + intercept
+            
+            hu_mean = float(np.mean(hu_pixels))
+            hu_std = float(np.std(hu_pixels))
+            hu_min = float(np.min(hu_pixels))
+            hu_max = float(np.max(hu_pixels))
+        
+        return {
+            'pixel_count': pixel_count,
+            'raw_mean': raw_mean, 'raw_std': raw_std, 'raw_min': raw_min, 'raw_max': raw_max,
+            'hu_mean': hu_mean, 'hu_std': hu_std, 'hu_min': hu_min, 'hu_max': hu_max
+        }
     
     # Signals for image navigation
     next_image_requested = Signal()
@@ -765,8 +900,8 @@ class PixelArrayTable(QWidget):
         # HU stats last calculated values (passed to external viewer)
         self._last_stats_text: str = "No data loaded"
         
-        # Overlay color
-        self._overlay_color: tuple = (255, 0, 0)  # Default: red
+        # Overlay color - cyan for better visibility in dark mode
+        self._overlay_color: tuple = (0, 255, 255)  # Default: cyan
         
         # HU conversion parameters
         self._slope: float = 1.0
@@ -874,106 +1009,56 @@ class PixelArrayTable(QWidget):
             # Get array (use first frame for 3D)
             arr = self._pixel_array[0] if self._pixel_array.ndim == 3 else self._pixel_array
             
-            # Get window region
+            # Get window region and mode
             win_x = self._window_x
             win_y = self._window_y
             win_w = self._window_width
             win_h = self._window_height
             
-            # Clamp to actual array bounds
-            win_x = max(0, min(win_x, arr.shape[1] - 1))
-            win_y = max(0, min(win_y, arr.shape[0] - 1))
-            win_w = min(win_w, arr.shape[1] - win_x)
-            win_h = min(win_h, arr.shape[0] - win_y)
+            # Check if we're in circle mode
+            is_circle = False
+            if (self._image_viewer is not None and 
+                hasattr(self._image_viewer, '_cursor_mode_circle')):
+                is_circle = self._image_viewer._cursor_mode_circle
             
-            if win_w <= 0 or win_h <= 0:
-                self._last_stats_text = "Window: 0x0"
+            # Use consolidated function for statistics
+            stats = self.calculate_region_stats(
+                arr, win_x, win_y, win_w, win_h,
+                is_circle=is_circle,
+                slope=self._slope,
+                intercept=self._intercept,
+                has_hu=self._has_hu
+            )
+            
+            # Determine window description
+            if is_circle:
+                diameter = min(win_w, win_h)
+                window_desc = f"Circle: {diameter}x{diameter} = {stats['pixel_count']} pixels"
             else:
-                # Extract window region
-                region = arr[win_y:win_y + win_h, win_x:win_x + win_w]
-                
-                # Check if we're in circle mode and have a viewer
-                is_circle = False
-                if (self._image_viewer is not None and 
-                    hasattr(self._image_viewer, '_cursor_mode_circle')):
-                    is_circle = self._image_viewer._cursor_mode_circle
-                
-                if is_circle and win_w > 0 and win_h > 0:
-                    # For circle mode, only use pixels within the circle
-                    # Circle is centered at (win_w/2, win_h/2) with diameter = min(win_w, win_h)
-                    center_x = win_w / 2
-                    center_y = win_h / 2
-                    diameter = min(win_w, win_h)
-                    radius = diameter / 2
-                    radius_sq = radius * radius
-                    
-                    # Create mask for circle
-                    yy, xx = np.ogrid[:win_h, :win_w]
-                    mask = (xx - center_x)**2 + (yy - center_y)**2 <= radius_sq
-                    
-                    # Extract pixels within circle
-                    circle_pixels = region[mask]
-                    total_pixels = len(circle_pixels)
-                    window_desc = f"Circle: {diameter}x{diameter} = {total_pixels} pixels"
-                    
-                    if total_pixels > 0:
-                        # Calculate Raw statistics for circle pixels
-                        raw_mean = float(np.mean(circle_pixels))
-                        raw_std = float(np.std(circle_pixels))
-                        raw_min = float(np.min(circle_pixels))
-                        raw_max = float(np.max(circle_pixels))
-                    else:
-                        raw_mean = raw_std = raw_min = raw_max = 0.0
-                else:
-                    # For rectangle mode, use all pixels in the region
-                    total_pixels = region.size
-                    window_desc = f"Window: {win_w}x{win_h} = {total_pixels} pixels"
-                    
-                    # Calculate Raw statistics for rectangular region
-                    raw_mean = float(np.mean(region))
-                    raw_std = float(np.std(region))
-                    raw_min = float(np.min(region))
-                    raw_max = float(np.max(region))
-                
-                # Format raw stats
-                stats_text = f"""<b>{window_desc}</b><br>
+                window_desc = f"Window: {win_w}x{win_h} = {stats['pixel_count']} pixels"
+            
+            # Format stats text
+            stats_text = f"""<b>{window_desc}</b><br>
 <br>
 <b>Raw Pixel Data:</b><br>
-Mean: {raw_mean:8.2f}<br>
-Std Dev: {raw_std:8.2f}<br>
-Min: {raw_min:8.2f}<br>
-Max: {raw_max:8.2f}"""
-                
-                # Calculate HU statistics if HU conversion is available
-                if self._has_hu:
-                    # Apply HU conversion to the appropriate pixel set (circle or rectangle)
-                    if is_circle:
-                        if total_pixels > 0:
-                            hu_pixels = circle_pixels.astype(np.float32) * self._slope + self._intercept
-                        else:
-                            hu_pixels = np.array([])
-                    else:
-                        hu_pixels = region.astype(np.float32) * self._slope + self._intercept
-                    
-                    if len(hu_pixels) > 0:
-                        hu_mean = float(np.mean(hu_pixels))
-                        hu_std = float(np.std(hu_pixels))
-                        hu_min = float(np.min(hu_pixels))
-                        hu_max = float(np.max(hu_pixels))
-                    else:
-                        hu_mean = hu_std = hu_min = hu_max = 0.0
-                    
-                    stats_text += f"""<br>
+Mean: {stats['raw_mean']:8.2f}<br>
+Std Dev: {stats['raw_std']:8.2f}<br>
+Min: {stats['raw_min']:8.2f}<br>
+Max: {stats['raw_max']:8.2f}"""
+            
+            # Add HU statistics if available
+            if self._has_hu:
+                stats_text += f"""<br>
 <br>
 <b>Hounsfield Units (HU):</b><br>
-Mean: {hu_mean:8.2f}<br>
-Std Dev: {hu_std:8.2f}<br>
-Min: {hu_min:8.2f}<br>
-Max: {hu_max:8.2f}"""
-                else:
-                    stats_text += "<br><br><i>HU: Not available</i>"
-                
-                self._last_stats_text = stats_text
+Mean: {stats['hu_mean']:8.2f}<br>
+Std Dev: {stats['hu_std']:8.2f}<br>
+Min: {stats['hu_min']:8.2f}<br>
+Max: {stats['hu_max']:8.2f}"""
+            else:
+                stats_text += "<br><br><i>HU: Not available</i>"
+            
+            self._last_stats_text = stats_text
         
         # Update external viewer's stats display
         if self._image_viewer is not None:
@@ -1054,87 +1139,44 @@ Max: {hu_max:8.2f}"""
         is_circle = data.get('is_circle', False)
         
         if self._pixel_array is not None and self._dataset is not None:
-            # Calculate the window region based on cursor position and size
+            # Use the EXACT same window as the stats box - no recalculation from cursor position
+            # The table's _window_x/y/width/height are the single source of truth
             arr = self._pixel_array[0] if self._pixel_array.ndim == 3 else self._pixel_array
-            rows = arr.shape[0]
-            cols = arr.shape[1]
             
-            # Ensure cursor_size is odd for proper centering
-            actual_cursor_size = max(1, cursor_size)
-            if actual_cursor_size % 2 == 0:
-                actual_cursor_size += 1
-            half_size = actual_cursor_size // 2
+            # Get current window from table (same as stats box)
+            win_x = self._window_x
+            win_y = self._window_y
+            win_w = self._window_width
+            win_h = self._window_height
             
-            # Calculate window bounds
-            win_x = max(0, min(x - half_size, cols - actual_cursor_size)) if cols >= actual_cursor_size else 0
-            win_y = max(0, min(y - half_size, rows - actual_cursor_size)) if rows >= actual_cursor_size else 0
-            win_w = min(actual_cursor_size, cols - win_x)
-            win_h = min(actual_cursor_size, rows - win_y)
+            # Get circle mode from table's viewer (same as stats box)
+            if self._image_viewer is not None and hasattr(self._image_viewer, '_cursor_mode_circle'):
+                is_circle = self._image_viewer._cursor_mode_circle
             
-            # Extract the window region
-            region = arr[win_y:win_y + win_h, win_x:win_x + win_w]
+            # Use consolidated function for statistics - EXACT same call as _update_statistics
+            stats = self.calculate_region_stats(
+                arr, win_x, win_y, win_w, win_h,
+                is_circle=is_circle,
+                slope=self._slope,
+                intercept=self._intercept,
+                has_hu=self._has_hu
+            )
             
-            # Calculate statistics for this region
-            if is_circle and win_w > 0 and win_h > 0:
-                # Circle mode: only use pixels within the circle
-                center_x = win_w / 2
-                center_y = win_h / 2
-                diameter = min(win_w, win_h)
-                radius = diameter / 2
-                radius_sq = radius * radius
-                
-                yy, xx = np.ogrid[:win_h, :win_w]
-                mask = (xx - center_x)**2 + (yy - center_y)**2 <= radius_sq
-                circle_pixels = region[mask]
-                
-                if len(circle_pixels) > 0:
-                    raw_mean = float(np.mean(circle_pixels))
-                    raw_std = float(np.std(circle_pixels))
-                    raw_min = float(np.min(circle_pixels))
-                    raw_max = float(np.max(circle_pixels))
-                    
-                    if self._has_hu:
-                        hu_pixels = circle_pixels.astype(np.float32) * self._slope + self._intercept
-                        hu_mean = float(np.mean(hu_pixels))
-                        hu_std = float(np.std(hu_pixels))
-                        hu_min = float(np.min(hu_pixels))
-                        hu_max = float(np.max(hu_pixels))
-                    else:
-                        hu_mean = hu_std = hu_min = hu_max = 0.0
-                else:
-                    raw_mean = raw_std = raw_min = raw_max = 0.0
-                    hu_mean = hu_std = hu_min = hu_max = 0.0
-            else:
-                # Rectangle mode: use all pixels
-                raw_mean = float(np.mean(region))
-                raw_std = float(np.std(region))
-                raw_min = float(np.min(region))
-                raw_max = float(np.max(region))
-                
-                if self._has_hu:
-                    hu_region = region.astype(np.float32) * self._slope + self._intercept
-                    hu_mean = float(np.mean(hu_region))
-                    hu_std = float(np.std(hu_region))
-                    hu_min = float(np.min(hu_region))
-                    hu_max = float(np.max(hu_region))
-                else:
-                    hu_mean = hu_std = hu_min = hu_max = 0.0
-            
-            # Create measurement entry
+            # Create measurement entry using stats from consolidated function
             measurement = {
                 'x': x,
                 'y': y,
                 'z': z,
-                'cursor_size': actual_cursor_size,
+                'cursor_size': cursor_size,
                 'is_circle': is_circle,
-                'raw_mean': raw_mean,
-                'raw_std': raw_std,
-                'raw_min': raw_min,
-                'raw_max': raw_max,
-                'hu_mean': hu_mean,
-                'hu_std': hu_std,
-                'hu_min': hu_min,
-                'hu_max': hu_max,
+                'raw_mean': stats['raw_mean'],
+                'raw_std': stats['raw_std'],
+                'raw_min': stats['raw_min'],
+                'raw_max': stats['raw_max'],
+                'hu_mean': stats['hu_mean'],
+                'hu_std': stats['hu_std'],
+                'hu_min': stats['hu_min'],
+                'hu_max': stats['hu_max'],
                 'note': ''  # Free text field
             }
             
@@ -1266,6 +1308,24 @@ Max: {hu_max:8.2f}"""
         # Create tab widget for Raw and HU data
         self._tab_widget = QTabWidget(self)
         
+        # Dark mode styling for tab widget
+        self._tab_widget.setStyleSheet("""
+            QTabWidget {
+                background-color: #2b2b2b;
+            }
+            QTabBar::tab {
+                background-color: #3c3c3c;
+                color: #e0e0e0;
+                padding: 6px 12px;
+                border: 1px solid #444;
+                border-bottom: none;
+            }
+            QTabBar::tab:selected {
+                background-color: #2b2b2b;
+                border-bottom: 2px solid #0078d7;
+            }
+        """)
+        
         # Raw data tab
         self._raw_table = QTableView(self)
         self._raw_model = PixelArrayModel(None, False, 1.0, 0.0, self)
@@ -1277,6 +1337,26 @@ Max: {hu_max:8.2f}"""
         self._hu_model = PixelArrayModel(None, True, 1.0, 0.0, self)
         self._hu_table.setModel(self._hu_model)
         self._configure_table(self._hu_table)
+        
+        # Dark mode styling for tables
+        table_style = """
+            QTableView {
+                background-color: #2b2b2b;
+                color: #e0e0e0;
+                gridline-color: #444;
+                selection-background-color: #0078d7;
+                selection-color: #ffffff;
+                border: 1px solid #444;
+            }
+            QHeaderView::section {
+                background-color: #3c3c3c;
+                color: #e0e0e0;
+                padding: 4px;
+                border: 1px solid #444;
+            }
+        """
+        self._raw_table.setStyleSheet(table_style)
+        self._hu_table.setStyleSheet(table_style)
         
         self._tab_widget.addTab(self._raw_table, "Raw Pixel Data")
         self._tab_widget.addTab(self._hu_table, "Hounsfield Units (HU)")

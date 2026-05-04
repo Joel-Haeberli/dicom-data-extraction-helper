@@ -6,7 +6,7 @@ Converts DICOM pixel data to QImage and handles overlay compositing.
 Inspired by existing dicom_to_png.py and dicom_overlay_printer.py scripts.
 """
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import numpy as np
 
 from PySide6.QtGui import QImage, QPixmap, QPainter, qRgb
@@ -624,3 +624,251 @@ def get_original_size(ds: Dataset) -> QSize:
     rows = int(ds.get('Rows', 0))
     cols = int(ds.get('Columns', 0))
     return QSize(cols, rows)
+
+
+def analyze_region_across_series(
+    dicom_files: List['DICOMFile'],
+    region_def: dict,
+) -> List[dict]:
+    """
+    Analyze a region (circle or rectangle) across all images in a series.
+    
+    For each image in the series, extracts pixel values within the specified
+    region and calculates Raw and HU statistics.
+    
+    Args:
+        dicom_files: List of DICOMFile objects from the series
+        region_def: Region definition dictionary with keys:
+            - x: X coordinate in pixels (0-indexed)
+            - y: Y coordinate in pixels (0-indexed)
+            - size: Size/diameter in pixels
+            - is_circle: Boolean, True for circle, False for rectangle
+            
+    Returns:
+        List of result dictionaries, one per image, each containing:
+            - image_index: Index in the series (0-based)
+            - z_coordinate: Z position from ImagePositionPatient (mm)
+            - raw_mean, raw_std, raw_min, raw_max: Raw pixel statistics
+            - hu_mean, hu_std, hu_min, hu_max: Hounsfield Unit statistics (0 if not available)
+            - pixel_count: Number of pixels in the region (after clamping)
+            - region_bounds: Tuple of (x, y, width, height) used for this image
+            
+    Note:
+        - Uses pixel coordinates (same x,y applied to all images)
+        - Region is clamped to each image's bounds
+        - For circles: only pixels within the circle are included
+        - For rectangles: all pixels in the rectangular region are included
+        - HU conversion uses RescaleSlope and RescaleIntercept if available
+    """
+    results = []
+    
+    if not dicom_files:
+        return results
+    
+    # Extract region parameters
+    x = region_def.get('x', 0)
+    y = region_def.get('y', 0)
+    size = region_def.get('size', 7)
+    is_circle = region_def.get('is_circle', True)
+    
+    # Ensure size is odd for proper centering
+    if size % 2 == 0:
+        size += 1
+    
+    half_size = size // 2
+    
+    for idx, dicom_file in enumerate(dicom_files):
+        if not dicom_file.dataset or not dicom_file.is_image:
+            continue
+        
+        ds = dicom_file.dataset
+        
+        try:
+            # Get pixel array
+            pixel_array = ds.pixel_array
+            
+            # Handle 3D arrays (multi-frame) - use first frame
+            if pixel_array.ndim == 3:
+                pixel_array = pixel_array[0]
+            
+            if pixel_array.ndim != 2:
+                # Skip invalid arrays
+                continue
+            
+            rows, cols = pixel_array.shape
+            
+            # Calculate region bounds centered at (x, y)
+            win_x = x - half_size
+            win_y = y - half_size
+            win_w = size
+            win_h = size
+            
+            # Clamp to image bounds
+            win_x = max(0, min(win_x, cols - win_w)) if cols >= win_w else 0
+            win_y = max(0, min(win_y, rows - win_h)) if rows >= win_h else 0
+            win_w = min(win_w, cols - win_x)
+            win_h = min(win_h, rows - win_y)
+            
+            # Extract region
+            region = pixel_array[win_y:win_y + win_h, win_x:win_x + win_w]
+            
+            # Get HU conversion parameters
+            slope = float(getattr(ds, 'RescaleSlope', 1))
+            intercept = float(getattr(ds, 'RescaleIntercept', 0))
+            has_hu = hasattr(ds, 'RescaleSlope') and hasattr(ds, 'RescaleIntercept') and (slope != 1 or intercept != 0)
+            
+            # Calculate statistics based on region shape
+            # Calculate statistics using same logic as PixelArrayTable
+            if is_circle and win_w > 0 and win_h > 0:
+                # Circle mode: only use pixels within the circle
+                center_x = win_w / 2.0
+                center_y = win_h / 2.0
+                diameter = min(win_w, win_h)
+                radius = diameter / 2.0
+                radius_sq = radius * radius
+                
+                # Create circular mask using pixel center coordinates
+                yy, xx = np.ogrid[:win_h, :win_w]
+                mask = (xx + 0.5 - center_x)**2 + (yy + 0.5 - center_y)**2 <= radius_sq
+                
+                # Extract pixels within circle
+                circle_pixels = region[mask]
+                pixel_count = len(circle_pixels)
+                
+                if pixel_count > 0:
+                    raw_mean = float(np.mean(circle_pixels))
+                    raw_std = float(np.std(circle_pixels))
+                    raw_min = float(np.min(circle_pixels))
+                    raw_max = float(np.max(circle_pixels))
+                    
+                    if has_hu:
+                        hu_pixels = circle_pixels.astype(np.float64) * slope + intercept
+                        hu_mean = float(np.mean(hu_pixels))
+                        hu_std = float(np.std(hu_pixels))
+                        hu_min = float(np.min(hu_pixels))
+                        hu_max = float(np.max(hu_pixels))
+                    else:
+                        hu_mean = hu_std = hu_min = hu_max = 0.0
+                else:
+                    raw_mean = raw_std = raw_min = raw_max = 0.0
+                    hu_mean = hu_std = hu_min = hu_max = 0.0
+            else:
+                # Rectangle mode: use all pixels in region
+                pixel_count = region.size
+                
+                if pixel_count > 0:
+                    raw_mean = float(np.mean(region))
+                    raw_std = float(np.std(region))
+                    raw_min = float(np.min(region))
+                    raw_max = float(np.max(region))
+                    
+                    if has_hu:
+                        hu_region = region.astype(np.float64) * slope + intercept
+                        hu_mean = float(np.mean(hu_region))
+                        hu_std = float(np.std(hu_region))
+                        hu_min = float(np.min(hu_region))
+                        hu_max = float(np.max(hu_region))
+                    else:
+                        hu_mean = hu_std = hu_min = hu_max = 0.0
+                else:
+                    raw_mean = raw_std = raw_min = raw_max = 0.0
+                    hu_mean = hu_std = hu_min = hu_max = 0.0
+            
+            # Get Z coordinate from ImagePositionPatient
+            z_coordinate = 0.0
+            if 'ImagePositionPatient' in ds:
+                try:
+                    position = ds.ImagePositionPatient
+                    if isinstance(position, (list, tuple)) and len(position) >= 3:
+                        z_coordinate = float(position[2])
+                except (ValueError, TypeError, AttributeError):
+                    pass
+            
+            # Build result dictionary
+            result = {
+                'image_index': idx,
+                'image_name': dicom_file.filepath.name if dicom_file.filepath else '',
+                'z_coordinate': z_coordinate,
+                'raw_mean': raw_mean,
+                'raw_std': raw_std,
+                'raw_min': raw_min,
+                'raw_max': raw_max,
+                'hu_mean': hu_mean,
+                'hu_std': hu_std,
+                'hu_min': hu_min,
+                'hu_max': hu_max,
+                'pixel_count': pixel_count,
+                'region_bounds': (win_x, win_y, win_w, win_h),
+                'has_hu': has_hu,
+            }
+            
+            results.append(result)
+            
+        except Exception as e:
+            # Skip this image but continue with others
+            print(f"Warning: Could not analyze region for image {idx}: {e}")
+            continue
+    
+    return results
+
+
+def export_region_series_to_csv(
+    results: List[dict],
+    filepath: str,
+) -> bool:
+    """
+    Export region analysis results to a CSV file.
+    
+    Args:
+        results: List of result dictionaries from analyze_region_across_series()
+        filepath: Path to output CSV file
+        
+    Returns:
+        True if export was successful, False otherwise
+    """
+    import csv
+    
+    try:
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.writer(f)
+            
+            # Write header
+            header = [
+                'Image Index',
+                'Image Name',
+                'Z Coordinate',
+                'Raw Mean',
+                'Raw Std',
+                'Raw Min',
+                'Raw Max',
+                'HU Mean',
+                'HU Std',
+                'HU Min',
+                'HU Max',
+                'Pixel Count',
+            ]
+            writer.writerow(header)
+            
+            # Write data rows
+            for r in results:
+                row = [
+                    r.get('image_index', ''),
+                    r.get('image_name', ''),
+                    r.get('z_coordinate', ''),
+                    f"{r.get('raw_mean', 0):.2f}",
+                    f"{r.get('raw_std', 0):.2f}",
+                    f"{r.get('raw_min', 0):.2f}",
+                    f"{r.get('raw_max', 0):.2f}",
+                    f"{r.get('hu_mean', 0):.2f}",
+                    f"{r.get('hu_std', 0):.2f}",
+                    f"{r.get('hu_min', 0):.2f}",
+                    f"{r.get('hu_max', 0):.2f}",
+                    r.get('pixel_count', 0),
+                ]
+                writer.writerow(row)
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error exporting to CSV: {e}")
+        return False

@@ -11,6 +11,7 @@ The main application window with two-column layout:
 from pathlib import Path
 from typing import Optional, List
 import csv
+import numpy as np
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QPushButton, QLabel, QSpinBox,
@@ -156,9 +157,9 @@ class MainWindow(QMainWindow):
         
         # Measurements table (below metadata)
         self._measurements_table = QTableWidget(self)
-        self._measurements_table.setColumnCount(16)
+        self._measurements_table.setColumnCount(17)
         self._measurements_table.setHorizontalHeaderLabels([
-            "#", "Z", "X", "Y", "Size", "Form", 
+            "#", "Image Name", "Z", "X", "Y", "Size", "Form", 
             "Raw Mean", "Raw Std", "Raw Min", "Raw Max",
             "HU Mean", "HU Std", "HU Min", "HU Max",
             "Note", "Delete"
@@ -168,28 +169,62 @@ class MainWindow(QMainWindow):
         self._measurements_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._measurements_table.horizontalHeader().setStretchLastSection(False)
         
+        # Dark mode styling for measurements table
+        self._measurements_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #2b2b2b;
+                color: #e0e0e0;
+                gridline-color: #444;
+                selection-background-color: #0078d7;
+                selection-color: #ffffff;
+                border: 1px solid #444;
+            }
+            QHeaderView::section {
+                background-color: #3c3c3c;
+                color: #e0e0e0;
+                padding: 4px;
+                border: 1px solid #444;
+            }
+            QTableWidget::item {
+                padding: 2px;
+            }
+        """)
+        
         # Set column widths - Note column wider, others reasonable
         self._measurements_table.setColumnWidth(0, 40)  # #
-        self._measurements_table.setColumnWidth(1, 40)  # Z (new)
-        self._measurements_table.setColumnWidth(2, 40)  # X
-        self._measurements_table.setColumnWidth(3, 40)  # Y
-        self._measurements_table.setColumnWidth(4, 60)  # Size
-        self._measurements_table.setColumnWidth(5, 80)  # Form
-        self._measurements_table.setColumnWidth(6, 80)  # Raw Mean
-        self._measurements_table.setColumnWidth(7, 80)  # Raw Std
-        self._measurements_table.setColumnWidth(8, 80)  # Raw Min
-        self._measurements_table.setColumnWidth(9, 80)  # Raw Max
-        self._measurements_table.setColumnWidth(10, 80)  # HU Mean
-        self._measurements_table.setColumnWidth(11, 80)  # HU Std
-        self._measurements_table.setColumnWidth(12, 80)  # HU Min
-        self._measurements_table.setColumnWidth(13, 80)  # HU Max
-        self._measurements_table.setColumnWidth(14, 300)  # Note - wider
-        self._measurements_table.setColumnWidth(15, 60)  # Delete
+        self._measurements_table.setColumnWidth(1, 150)  # Image Name
+        self._measurements_table.setColumnWidth(2, 40)  # Z (new)
+        self._measurements_table.setColumnWidth(3, 40)  # X
+        self._measurements_table.setColumnWidth(4, 40)  # Y
+        self._measurements_table.setColumnWidth(5, 60)  # Size
+        self._measurements_table.setColumnWidth(6, 80)  # Form
+        self._measurements_table.setColumnWidth(7, 80)  # Raw Mean
+        self._measurements_table.setColumnWidth(8, 80)  # Raw Std
+        self._measurements_table.setColumnWidth(9, 80)  # Raw Min
+        self._measurements_table.setColumnWidth(10, 80)  # Raw Max
+        self._measurements_table.setColumnWidth(11, 80)  # HU Mean
+        self._measurements_table.setColumnWidth(12, 80)  # HU Std
+        self._measurements_table.setColumnWidth(13, 80)  # HU Min
+        self._measurements_table.setColumnWidth(14, 80)  # HU Max
+        self._measurements_table.setColumnWidth(15, 300)  # Note - wider
+        self._measurements_table.setColumnWidth(16, 60)  # Delete
         
         # Export button for measurements
         self._export_measurements_button = QPushButton("Export Measurements (CSV)", self)
         self._export_measurements_button.setToolTip("Export measurements table to CSV file")
         self._export_measurements_button.clicked.connect(self._on_export_measurements)
+        
+        # Export button for series region statistics
+        self._export_region_series_button = QPushButton("Export Series Region Stats (CSV)", self)
+        self._export_region_series_button.setToolTip("Export statistics for the last measured region across all images in the series")
+        self._export_region_series_button.clicked.connect(self._on_export_region_series)
+        self._export_region_series_button.setEnabled(False)
+        
+        # Export button for current window raw pixel data
+        self._export_current_window_button = QPushButton("Export Current Window (Raw CSV)", self)
+        self._export_current_window_button.setToolTip("Export raw pixel data from current table window to CSV")
+        self._export_current_window_button.clicked.connect(self._on_export_current_window)
+        self._export_current_window_button.setEnabled(False)
         
         # Connect cell change signal to update notes
         self._measurements_table.cellChanged.connect(self._on_measurement_cell_changed)
@@ -227,7 +262,15 @@ class MainWindow(QMainWindow):
         # Measurements table spans full width below columns
         measurements_layout = QVBoxLayout()
         measurements_layout.addWidget(self._measurements_table, 1)
-        measurements_layout.addWidget(self._export_measurements_button, 0)
+        
+        # Export buttons layout
+        export_layout = QHBoxLayout()
+        export_layout.addWidget(self._export_measurements_button, 0)
+        export_layout.addWidget(self._export_current_window_button, 0)
+        export_layout.addWidget(self._export_region_series_button, 0)
+        export_layout.addStretch(1)
+        
+        measurements_layout.addLayout(export_layout, 0)
         
         # Combine layouts
         main_layout.addLayout(top_layout, 0)
@@ -268,6 +311,8 @@ class MainWindow(QMainWindow):
             self._image_tabs.clear()
             self._measurements = []
             self._update_measurements_table()
+            self._export_current_window_button.setEnabled(False)
+            self._export_region_series_button.setEnabled(False)
             self._current_directory = directory
             self._current_image_index = 0
             
@@ -293,6 +338,10 @@ class MainWindow(QMainWindow):
             # Update navigation UI
             self._update_navigation_ui()
             self._update_current_selection(self._image_files[0].filepath.name)
+            
+            # Enable series region export if we have measurements
+            if self._measurements:
+                self._export_region_series_button.setEnabled(True)
             
         except Exception as e:
             QMessageBox.critical(
@@ -439,11 +488,25 @@ class MainWindow(QMainWindow):
         Args:
             measurement: Dictionary containing measurement data
         """
+        # Add image filename to measurement based on z index
+        z_index = measurement.get('z', 0)
+        if 0 <= z_index < len(self._image_files):
+            measurement['image_name'] = self._image_files[z_index].filepath.name
+        else:
+            measurement['image_name'] = ''
+        
         # Add to measurements list
         self._measurements.append(measurement)
         
         # Update measurements table
         self._update_measurements_table()
+        
+        # Enable export buttons if we have measurements
+        if self._measurements:
+            self._export_region_series_button.setEnabled(True)
+        # Current window export is enabled when we have pixel data
+        if hasattr(self._image_tabs.pixel_array_table, '_pixel_array') and self._image_tabs.pixel_array_table._pixel_array is not None:
+            self._export_current_window_button.setEnabled(True)
     
     def _on_measurement_cell_changed(self, row: int, column: int):
         """Handler for cell changes in measurements table.
@@ -453,8 +516,8 @@ class MainWindow(QMainWindow):
             row: Row index of the changed cell
             column: Column index of the changed cell
         """
-        # Only handle changes in the Note column (column 14)
-        if column == 14 and 0 <= row < len(self._measurements):
+        # Only handle changes in the Note column (column 15)
+        if column == 15 and 0 <= row < len(self._measurements):
             item = self._measurements_table.item(row, column)
             if item is not None:
                 # Update the note in the measurement dictionary
@@ -463,17 +526,89 @@ class MainWindow(QMainWindow):
     def _on_measurement_cell_clicked(self, row: int, column: int):
         """Handler for cell clicks in measurements table.
         Deletes measurement when Delete button is clicked.
+        Resets window to measurement when any other cell is clicked.
         
         Args:
             row: Row index of the clicked cell
             column: Column index of the clicked cell
         """
-        # Only handle clicks in the Delete column (column 15)
-        if column == 15 and 0 <= row < len(self._measurements):
-            # Remove the measurement from the list
-            self._measurements.pop(row)
-            # Update the table
-            self._update_measurements_table()
+        if 0 <= row < len(self._measurements):
+            # Handle Delete column
+            if column == 16:
+                # Remove the measurement from the list
+                self._measurements.pop(row)
+                # Update the table
+                self._update_measurements_table()
+                # Update export button states
+                if not self._measurements:
+                    self._export_region_series_button.setEnabled(False)
+            else:
+                # For any other column: reset measurement window to this measurement
+                measurement = self._measurements[row]
+                self._reset_window_to_measurement(measurement)
+    
+    def _reset_window_to_measurement(self, measurement: dict):
+        """Reset the pixel array table window to match a measurement.
+        
+        The measurement's x,y are the CENTER of the window.
+        This converts them to top-left corner coordinates and sets the window.
+        
+        Args:
+            measurement: Measurement dictionary with x, y, cursor_size, is_circle
+        """
+        if not hasattr(self, '_image_tabs') or self._image_tabs is None:
+            return
+        
+        pixel_table = self._image_tabs.pixel_array_table
+        if pixel_table is None or pixel_table._pixel_array is None:
+            return
+        
+        # Get measurement parameters
+        center_x = measurement.get('x', 0)
+        center_y = measurement.get('y', 0)
+        cursor_size = measurement.get('cursor_size', 7)
+        is_circle = measurement.get('is_circle', False)
+        
+        # Get array dimensions
+        arr = pixel_table._pixel_array[0] if pixel_table._pixel_array.ndim == 3 else pixel_table._pixel_array
+        rows = arr.shape[0]
+        cols = arr.shape[1]
+        
+        # Ensure cursor_size is odd for proper centering
+        actual_cursor_size = max(1, cursor_size)
+        if actual_cursor_size % 2 == 0:
+            actual_cursor_size += 1
+        half_size = actual_cursor_size // 2
+        
+        # Calculate top-left of window from center
+        win_x = max(0, min(center_x - half_size, cols - actual_cursor_size)) if cols >= actual_cursor_size else 0
+        win_y = max(0, min(center_y - half_size, rows - actual_cursor_size)) if rows >= actual_cursor_size else 0
+        win_w = min(actual_cursor_size, cols)
+        win_h = min(actual_cursor_size, rows)
+        
+        # Set the window in the pixel array table
+        pixel_table._window_x = win_x
+        pixel_table._window_y = win_y
+        pixel_table._window_width = win_w
+        pixel_table._window_height = win_h
+        
+        # Update spin boxes
+        pixel_table._win_x_spin.setValue(win_x)
+        pixel_table._win_y_spin.setValue(win_y)
+        pixel_table._win_width_spin.setValue(win_w)
+        pixel_table._win_height_spin.setValue(win_h)
+        
+        # Update cursor mode in viewer
+        if pixel_table._image_viewer is not None:
+            pixel_table._image_viewer.set_cursor_mode_circle(is_circle)
+        
+        # Update highlight region and models
+        pixel_table._update_highlight_region()
+        pixel_table._update_models()
+        
+        # Update cursor rectangle on viewer
+        if pixel_table._image_viewer is not None:
+            pixel_table._image_viewer.set_cursor_rect(win_x, win_y, win_w, win_h)
     
     def _on_export_measurements(self):
         """Export measurements to CSV file."""
@@ -514,6 +649,7 @@ class MainWindow(QMainWindow):
                 for i, m in enumerate(self._measurements):
                     row = [
                         str(i + 1),  # Index
+                        str(m.get('image_name', '')),  # Image Name
                         str(m.get('z', '')),  # Z index
                         str(m.get('x', '')),
                         str(m.get('y', '')),
@@ -536,6 +672,164 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", f"Failed to export measurements:\n{str(e)}")
     
+    def _on_export_region_series(self):
+        """Export region statistics across all images in the series."""
+        from gui.utils.image_utils import analyze_region_across_series, export_region_series_to_csv
+        
+        # Check if we have images loaded
+        if not self._image_files:
+            QMessageBox.information(self, "No Images", "No images loaded. Please load a DICOM directory first.")
+            return
+        
+        # Check if we have any measurements
+        if not self._measurements:
+            QMessageBox.information(self, "No Measurements", "No measurements defined. Please use the measurement tool to define a region first.")
+            return
+        
+        # Use the last measurement (most recent)
+        last_measurement = self._measurements[-1]
+        
+        # Extract region definition from measurement
+        region_def = {
+            'x': last_measurement.get('x', 0),
+            'y': last_measurement.get('y', 0),
+            'size': last_measurement.get('cursor_size', 7),
+            'is_circle': last_measurement.get('is_circle', True),
+        }
+        
+        # Analyze region across all images
+        results = analyze_region_across_series(self._image_files, region_def)
+        
+        if not results:
+            QMessageBox.information(self, "No Results", "No results were generated. Check that all images are valid.")
+            return
+        
+        # Get save file path
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Series Region Statistics",
+            "",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        
+        if not file_path:
+            return
+        
+        # Ensure .csv extension
+        if not file_path.lower().endswith('.csv'):
+            file_path += '.csv'
+        
+        # Export to CSV
+        success = export_region_series_to_csv(results, file_path)
+        
+        if success:
+            QMessageBox.information(
+                self,
+                "Export Successful",
+                f"Region statistics exported for {len(results)} images to:\n{file_path}"
+            )
+        else:
+            QMessageBox.critical(self, "Export Failed", "Failed to export region statistics to CSV.")
+    
+    def _on_export_current_window(self):
+        """Export raw pixel data from current table window to CSV.
+        
+        CSV format:
+        - Header row: column numbers
+        - First column: row numbers  
+        - Data: raw pixel values from current window
+        """
+        # Get the pixel array table
+        pixel_table = self._image_tabs.pixel_array_table
+        
+        if pixel_table._pixel_array is None:
+            QMessageBox.information(self, "No Data", "No pixel data loaded to export.")
+            return
+        
+        # Get save file path
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Current Window (Raw)",
+            "",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        
+        if not file_path:
+            return
+        
+        # Ensure .csv extension
+        if not file_path.lower().endswith('.csv'):
+            file_path += '.csv'
+        
+        try:
+            # Get current window parameters from pixel array table
+            win_x = pixel_table._window_x
+            win_y = pixel_table._window_y
+            win_w = pixel_table._window_width
+            win_h = pixel_table._window_height
+            
+            # Get pixel array (use first frame for 3D)
+            arr = pixel_table._pixel_array[0] if pixel_table._pixel_array.ndim == 3 else pixel_table._pixel_array
+            
+            # Clamp window to array bounds
+            rows, cols = arr.shape
+            win_x = max(0, min(win_x, cols - win_w)) if win_w > 0 else 0
+            win_y = max(0, min(win_y, rows - win_h)) if win_h > 0 else 0
+            win_w = min(win_w, cols - win_x)
+            win_h = min(win_h, rows - win_y)
+            
+            if win_w <= 0 or win_h <= 0:
+                QMessageBox.information(self, "Invalid Window", "Current window has invalid dimensions.")
+                return
+            
+            # Extract the window region
+            region = arr[win_y:win_y + win_h, win_x:win_x + win_w]
+            
+            # Check if we're in circle mode and have a viewer
+            is_circle = False
+            if pixel_table._image_viewer is not None and hasattr(pixel_table._image_viewer, '_cursor_mode_circle'):
+                is_circle = pixel_table._image_viewer._cursor_mode_circle
+            
+            # For circle mode, apply mask
+            is_flattened = False
+            if is_circle and win_w > 0 and win_h > 0:
+                center_x = win_w / 2.0
+                center_y = win_h / 2.0
+                diameter = min(win_w, win_h)
+                radius = diameter / 2.0
+                radius_sq = radius * radius
+                
+                yy, xx = np.ogrid[:win_h, :win_w]
+                mask = (xx + 0.5 - center_x)**2 + (yy + 0.5 - center_y)**2 <= radius_sq
+                region = region[mask]
+                is_flattened = True
+            
+            # Write CSV
+            with open(file_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                
+                if is_flattened and region.ndim == 1:
+                    # Circle mode: flattened 1D array
+                    # Export as single column with row indices
+                    header = ['Index', 'Pixel Value']
+                    writer.writerow(header)
+                    for idx, value in enumerate(region):
+                        writer.writerow([str(idx), str(int(value))])
+                else:
+                    # Standard 2D array export
+                    # Header: Row + column numbers
+                    header = ['Row'] + [str(j) for j in range(win_x, win_x + region.shape[1])]
+                    writer.writerow(header)
+                    
+                    # Data rows: row number + pixel values
+                    for row_idx in range(region.shape[0]):
+                        row_data = [str(win_y + row_idx)] + [str(int(region[row_idx, col_idx])) for col_idx in range(region.shape[1])]
+                        writer.writerow(row_data)
+            
+            QMessageBox.information(self, "Export Successful", f"Current window exported to:\n{file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to export current window:\n{str(e)}")
+    
     def _update_measurements_table(self):
         """Update the measurements table with current measurements."""
         # Clear existing rows
@@ -548,56 +842,59 @@ class MainWindow(QMainWindow):
             # Column 0: Index
             self._measurements_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
             
-            # Column 1: Z index
-            self._measurements_table.setItem(i, 1, QTableWidgetItem(str(m.get('z', 0))))
+            # Column 1: Image Name
+            self._measurements_table.setItem(i, 1, QTableWidgetItem(str(m.get('image_name', ''))))
             
-            # Column 2: X position
-            self._measurements_table.setItem(i, 2, QTableWidgetItem(str(m.get('x', 0))))
+            # Column 2: Z index
+            self._measurements_table.setItem(i, 2, QTableWidgetItem(str(m.get('z', 0))))
             
-            # Column 3: Y position
-            self._measurements_table.setItem(i, 3, QTableWidgetItem(str(m.get('y', 0))))
+            # Column 3: X position
+            self._measurements_table.setItem(i, 3, QTableWidgetItem(str(m.get('x', 0))))
             
-            # Column 4: Cursor Size
-            self._measurements_table.setItem(i, 4, QTableWidgetItem(str(m.get('cursor_size', 0))))
+            # Column 4: Y position
+            self._measurements_table.setItem(i, 4, QTableWidgetItem(str(m.get('y', 0))))
             
-            # Column 5: Form (Circle/Rectangle)
+            # Column 5: Cursor Size
+            self._measurements_table.setItem(i, 5, QTableWidgetItem(str(m.get('cursor_size', 0))))
+            
+            # Column 6: Form (Circle/Rectangle)
             form = "Circle" if m.get('is_circle', False) else "Rectangle"
-            self._measurements_table.setItem(i, 5, QTableWidgetItem(form))
+            self._measurements_table.setItem(i, 6, QTableWidgetItem(form))
             
-            # Column 6: Raw Mean
-            self._measurements_table.setItem(i, 6, QTableWidgetItem(f"{m.get('raw_mean', 0):.2f}"))
+            # Column 7: Raw Mean
+            self._measurements_table.setItem(i, 7, QTableWidgetItem(f"{m.get('raw_mean', 0):.2f}"))
             
-            # Column 7: Raw Std
-            self._measurements_table.setItem(i, 7, QTableWidgetItem(f"{m.get('raw_std', 0):.2f}"))
+            # Column 8: Raw Std
+            self._measurements_table.setItem(i, 8, QTableWidgetItem(f"{m.get('raw_std', 0):.2f}"))
             
-            # Column 8: Raw Min
-            self._measurements_table.setItem(i, 8, QTableWidgetItem(f"{m.get('raw_min', 0):.2f}"))
+            # Column 9: Raw Min
+            self._measurements_table.setItem(i, 9, QTableWidgetItem(f"{m.get('raw_min', 0):.2f}"))
             
-            # Column 9: Raw Max
-            self._measurements_table.setItem(i, 9, QTableWidgetItem(f"{m.get('raw_max', 0):.2f}"))
+            # Column 10: Raw Max
+            self._measurements_table.setItem(i, 10, QTableWidgetItem(f"{m.get('raw_max', 0):.2f}"))
             
-            # Column 10: HU Mean
-            self._measurements_table.setItem(i, 10, QTableWidgetItem(f"{m.get('hu_mean', 0):.2f}"))
+            # Column 11: HU Mean
+            self._measurements_table.setItem(i, 11, QTableWidgetItem(f"{m.get('hu_mean', 0):.2f}"))
             
-            # Column 11: HU Std
-            self._measurements_table.setItem(i, 11, QTableWidgetItem(f"{m.get('hu_std', 0):.2f}"))
+            # Column 12: HU Std
+            self._measurements_table.setItem(i, 12, QTableWidgetItem(f"{m.get('hu_std', 0):.2f}"))
             
-            # Column 12: HU Min
-            self._measurements_table.setItem(i, 12, QTableWidgetItem(f"{m.get('hu_min', 0):.2f}"))
+            # Column 13: HU Min
+            self._measurements_table.setItem(i, 13, QTableWidgetItem(f"{m.get('hu_min', 0):.2f}"))
             
-            # Column 13: HU Max
-            self._measurements_table.setItem(i, 13, QTableWidgetItem(f"{m.get('hu_max', 0):.2f}"))
+            # Column 14: HU Max
+            self._measurements_table.setItem(i, 14, QTableWidgetItem(f"{m.get('hu_max', 0):.2f}"))
             
-            # Column 14: Note (editable)
+            # Column 15: Note (editable)
             note_item = QTableWidgetItem(m.get('note', ''))
             note_item.setFlags(note_item.flags() | Qt.ItemFlag.ItemIsEditable)
-            self._measurements_table.setItem(i, 14, note_item)
+            self._measurements_table.setItem(i, 15, note_item)
             
-            # Column 15: Delete button
+            # Column 16: Delete button
             delete_item = QTableWidgetItem("Delete")
             delete_item.setForeground(QColor(200, 0, 0))
             delete_item.setToolTip("Click to delete this measurement")
-            self._measurements_table.setItem(i, 15, delete_item)
+            self._measurements_table.setItem(i, 16, delete_item)
     
 
     
