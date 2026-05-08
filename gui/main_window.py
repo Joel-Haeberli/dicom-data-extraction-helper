@@ -22,8 +22,8 @@ from PySide6.QtCore import Qt, Signal, QSize, QEvent
 from PySide6.QtGui import QIcon, QWheelEvent, QColor
 from PySide6.QtWidgets import QSizePolicy
 
-from gui.metadata_table import MetadataTable
 from gui.image_tabs import ImageTabs
+from gui.curve_view import CurveView
 from gui.utils.dicom_loader import DICOMLoader, DICOMFile
 from gui.utils.image_utils import (
     dicom_to_qimage,
@@ -81,6 +81,7 @@ class MainWindow(QMainWindow):
         self._image_tabs.pixel_array_table.overlay_color_changed.connect(self._set_overlay_color)
         self._image_tabs.pixel_array_table.add_measurement_requested.connect(self._on_add_measurement)
         self._image_tabs.pixel_array_table.viewer_reopened.connect(self._on_viewer_reopened)
+        self._image_tabs.pixel_array_table.window_changed.connect(self._update_curve_from_window)
         
         # Initial state
         self._update_current_selection()
@@ -156,8 +157,8 @@ class MainWindow(QMainWindow):
         # Overlay color state
         self._overlay_color = (255, 0, 0)  # Default: red
         
-        # Metadata table (left column)
-        self._metadata_table = MetadataTable(self)
+        # Curve view (left column, replaces metadata table)
+        self._curve_view = CurveView(self)
         
         # Measurements table (below metadata)
         self._measurements_table = QTableWidget(self)
@@ -266,8 +267,8 @@ class MainWindow(QMainWindow):
         # DICOM Explorer (top of left column, minimal height)
         left_layout.addWidget(self._explorer, 0)
         
-        # Metadata table (bottom of left column, takes remaining space)
-        left_layout.addWidget(self._metadata_table, 1)
+        # Curve view (bottom of left column, takes remaining space)
+        left_layout.addWidget(self._curve_view, 1)
         
         columns_layout.addWidget(left_column, 1)
         
@@ -307,7 +308,7 @@ class MainWindow(QMainWindow):
         """
         try:
             # Clear previous state (but NOT measurements - they are preserved)
-            self._metadata_table.clear()
+            self._curve_view.clear()
             self._image_tabs.clear()
             self._export_current_window_button.setEnabled(False)
             self._export_region_series_button.setEnabled(False)
@@ -396,9 +397,6 @@ class MainWindow(QMainWindow):
         """
         self._current_dicom_file = dicom_file
         
-        # Display metadata
-        self._metadata_table.set_metadata(dicom_file.metadata)
-        
         # Display image and pixel data
         if dicom_file.dataset and dicom_file.is_image:
             # Set dataset on image tabs (handles both image and lazy pixel data loading)
@@ -406,6 +404,9 @@ class MainWindow(QMainWindow):
             
             # Try to find and display overlay
             self._load_overlay_for_current_file()
+            
+            # Update curve view with first row of default window
+            self._update_curve_from_window()
     
     def _on_prev_button_clicked(self):
         """Handler for Previous button click."""
@@ -645,6 +646,57 @@ class MainWindow(QMainWindow):
         # Update cursor rectangle on viewer
         if pixel_table._image_viewer is not None:
             pixel_table._image_viewer.set_cursor_rect(win_x, win_y, win_w, win_h)
+        
+        # Emit window changed signal to update curve
+        pixel_table.window_changed.emit()
+    
+    def _update_curve_from_window(self):
+        """Update curve view with first row of current window."""
+        if not hasattr(self, '_curve_view') or self._curve_view is None:
+            return
+        
+        pixel_table = self._image_tabs.pixel_array_table
+        if pixel_table is None or pixel_table._pixel_array is None:
+            self._curve_view.clear()
+            return
+        
+        # Get current window
+        win_x = pixel_table._window_x
+        win_y = pixel_table._window_y
+        win_w = pixel_table._window_width
+        win_h = pixel_table._window_height
+        
+        # Get pixel array
+        arr = pixel_table._pixel_array[0] if pixel_table._pixel_array.ndim == 3 else pixel_table._pixel_array
+        
+        # Clamp window to array bounds
+        rows = arr.shape[0]
+        cols = arr.shape[1]
+        win_x = max(0, min(win_x, cols - 1))
+        win_y = max(0, min(win_y, rows - 1))
+        win_w = max(1, min(win_w, cols - win_x))
+        win_h = max(1, min(win_h, rows - win_y))
+        
+        # Extract first row of window
+        region = arr[win_y:win_y + win_h, win_x:win_x + win_w]
+        if region.size == 0:
+            self._curve_view.clear()
+            return
+        
+        row_data = region[0]  # First row
+        
+        # Get HU conversion parameters
+        slope = getattr(pixel_table._dataset, 'RescaleSlope', 1.0) if pixel_table._dataset else 1.0
+        intercept = getattr(pixel_table._dataset, 'RescaleIntercept', 0.0) if pixel_table._dataset else 0.0
+        
+        # Convert to HU
+        hu_values = [float(v) * slope + intercept for v in row_data]
+        
+        # X values (absolute pixel positions)
+        x_values = [win_x + i for i in range(len(row_data))]
+        
+        # Update curve
+        self._curve_view.set_data(x_values, hu_values)
     
     def _on_export_measurements(self):
         """Export measurements to CSV file."""

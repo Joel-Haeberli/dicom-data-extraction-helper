@@ -877,6 +877,7 @@ class PixelArrayTable(QWidget):
     measurement_captured = Signal(dict)  # Measurement data dictionary (forwarded from viewer)
     add_measurement_requested = Signal(dict)  # Request to add measurement to main window
     viewer_reopened = Signal()  # Emitted when image viewer window is reopened
+    window_changed = Signal()  # Emitted when window position/size changes
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1632,6 +1633,9 @@ Max: {stats['hu_max']:8.2f}"""
         self._window_y = self._win_y_spin.value()
         self._window_width = self._win_width_spin.value()
         self._window_height = self._win_height_spin.value()
+        
+        # Emit window changed signal
+        self.window_changed.emit()
         
         # Update cursor rectangle on image viewer to match new window
         if self._image_viewer is not None:
