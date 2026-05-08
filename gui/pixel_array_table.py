@@ -1134,11 +1134,14 @@ Max: {stats['hu_max']:8.2f}"""
         """
         x = data.get('x', 0)
         y = data.get('y', 0)
-        z = data.get('z', 0)
+        z_index = data.get('z', 0)
         cursor_size = data.get('cursor_size', 7)
         is_circle = data.get('is_circle', False)
         
         if self._pixel_array is not None and self._dataset is not None:
+            # Get physical Z from current dataset
+            z_physical = float(getattr(self._dataset, 'ImagePositionPatient', [0, 0, 0])[2])
+            
             # Use the EXACT same window as the stats box - no recalculation from cursor position
             # The table's _window_x/y/width/height are the single source of truth
             arr = self._pixel_array[0] if self._pixel_array.ndim == 3 else self._pixel_array
@@ -1166,7 +1169,7 @@ Max: {stats['hu_max']:8.2f}"""
             measurement = {
                 'x': x,
                 'y': y,
-                'z': z,
+                'z': z_physical,
                 'cursor_size': cursor_size,
                 'is_circle': is_circle,
                 'raw_mean': stats['raw_mean'],
@@ -1182,6 +1185,67 @@ Max: {stats['hu_max']:8.2f}"""
             
             # Emit signal to main window to add to measurements list
             self.add_measurement_requested.emit(measurement)
+    
+    def _on_measure_button_clicked(self):
+        """Handler for Measure button click - adds measurement of current window."""
+        if self._pixel_array is None or self._dataset is None:
+            return
+        
+        arr = self._pixel_array[0] if self._pixel_array.ndim == 3 else self._pixel_array
+        
+        # Get current window from table
+        win_x = self._window_x
+        win_y = self._window_y
+        win_w = self._window_width
+        win_h = self._window_height
+        
+        if win_w <= 0 or win_h <= 0:
+            return
+        
+        # Get circle mode from table's viewer
+        is_circle = False
+        if self._image_viewer is not None and hasattr(self._image_viewer, '_cursor_mode_circle'):
+            is_circle = self._image_viewer._cursor_mode_circle
+        
+        # Calculate center position for x, y
+        x = win_x + win_w // 2
+        y = win_y + win_h // 2
+        
+        # Get physical Z from current dataset
+        z = float(getattr(self._dataset, 'ImagePositionPatient', [0, 0, 0])[2])
+        
+        # Get cursor size (window size for square, or diameter for circle)
+        cursor_size = max(win_w, win_h) if is_circle else max(win_w, win_h)
+        
+        # Calculate statistics for current window
+        stats = self.calculate_region_stats(
+            arr, win_x, win_y, win_w, win_h,
+            is_circle=is_circle,
+            slope=self._slope,
+            intercept=self._intercept,
+            has_hu=self._has_hu
+        )
+        
+        # Create measurement entry
+        measurement = {
+            'x': x,
+            'y': y,
+            'z': z,
+            'cursor_size': cursor_size,
+            'is_circle': is_circle,
+            'raw_mean': stats['raw_mean'],
+            'raw_std': stats['raw_std'],
+            'raw_min': stats['raw_min'],
+            'raw_max': stats['raw_max'],
+            'hu_mean': stats['hu_mean'],
+            'hu_std': stats['hu_std'],
+            'hu_min': stats['hu_min'],
+            'hu_max': stats['hu_max'],
+            'note': ''
+        }
+        
+        # Emit signal to main window to add to measurements list
+        self.add_measurement_requested.emit(measurement)
     
     def _on_cursor_window_size_changed(self, size: int):
         """Handler for cursor window size spin box changes."""
@@ -1273,6 +1337,12 @@ Max: {stats['hu_max']:8.2f}"""
         window_layout.addWidget(QLabel("Y:", self))
         window_layout.addWidget(self._win_y_spin)
         
+        # Measure button
+        self._measure_button = QPushButton("Measure", self)
+        self._measure_button.setToolTip("Add measurement of current window")
+        self._measure_button.clicked.connect(self._on_measure_button_clicked)
+        window_layout.addWidget(self._measure_button)
+        
         # Window size controls
         self._win_width_spin = QSpinBox(self)
         self._win_width_spin.setMinimum(1)
@@ -1360,6 +1430,7 @@ Max: {stats['hu_max']:8.2f}"""
         
         self._tab_widget.addTab(self._raw_table, "Raw Pixel Data")
         self._tab_widget.addTab(self._hu_table, "Hounsfield Units (HU)")
+        self._tab_widget.setCurrentIndex(1)  # Show HU tab by default
         
         main_layout.addWidget(self._tab_widget, 1)
     

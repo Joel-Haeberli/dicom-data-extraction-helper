@@ -15,7 +15,7 @@ import numpy as np
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QPushButton, QLabel, QSpinBox,
-    QHBoxLayout, QVBoxLayout, QFileDialog, QMessageBox,
+    QHBoxLayout, QVBoxLayout, QMessageBox, QFileDialog,
     QColorDialog, QCheckBox, QTableWidget, QTableWidgetItem
 )
 from PySide6.QtCore import Qt, Signal, QSize, QEvent
@@ -62,6 +62,8 @@ class MainWindow(QMainWindow):
         self._image_files: List[DICOMFile] = []
         self._overlay_color = (255, 0, 0)  # Default: red
         self._measurements: List[dict] = []  # List of measurement entries
+        self._current_study_uid: str = ''  # Current study UID for linking measurements
+        self._current_series_uid: str = ''  # Current series UID for linking measurements
         self._image_viewer_window = None  # Reference to external image viewer window
         
         # Create UI
@@ -127,14 +129,16 @@ class MainWindow(QMainWindow):
         self._central_widget = QWidget(self)
         self.setCentralWidget(self._central_widget)
         
-        # Top controls
-        self._load_button = QPushButton("Load DICOM Directory...", self)
-        self._load_button.setToolTip("Select a directory containing DICOM files")
-        
+        # Top controls - Load button removed, replaced by explorer
         # Show image window button
         self._show_image_window_button = QPushButton("Show Image Window", self)
         self._show_image_window_button.setToolTip("Open or reopen the image viewer window")
         self._show_image_window_button.clicked.connect(self._on_show_image_window_clicked)
+        
+        # DICOM Explorer widget
+        from gui.explorer import DICOMExplorer
+        self._explorer = DICOMExplorer(self)
+        self._explorer.directory_selected.connect(self._load_dicom_directory)
         
         # Current file label
         self._current_selection_label = QLabel("No DICOM directory loaded", self)
@@ -157,9 +161,9 @@ class MainWindow(QMainWindow):
         
         # Measurements table (below metadata)
         self._measurements_table = QTableWidget(self)
-        self._measurements_table.setColumnCount(17)
+        self._measurements_table.setColumnCount(18)
         self._measurements_table.setHorizontalHeaderLabels([
-            "#", "Image Name", "Z", "X", "Y", "Size", "Form", 
+            "#", "Study", "Image Name", "Z", "X", "Y", "Size", "Form", 
             "Raw Mean", "Raw Std", "Raw Min", "Raw Max",
             "HU Mean", "HU Std", "HU Min", "HU Max",
             "Note", "Delete"
@@ -192,22 +196,23 @@ class MainWindow(QMainWindow):
         
         # Set column widths - Note column wider, others reasonable
         self._measurements_table.setColumnWidth(0, 40)  # #
-        self._measurements_table.setColumnWidth(1, 150)  # Image Name
-        self._measurements_table.setColumnWidth(2, 40)  # Z (new)
-        self._measurements_table.setColumnWidth(3, 40)  # X
-        self._measurements_table.setColumnWidth(4, 40)  # Y
-        self._measurements_table.setColumnWidth(5, 60)  # Size
-        self._measurements_table.setColumnWidth(6, 80)  # Form
-        self._measurements_table.setColumnWidth(7, 80)  # Raw Mean
-        self._measurements_table.setColumnWidth(8, 80)  # Raw Std
-        self._measurements_table.setColumnWidth(9, 80)  # Raw Min
-        self._measurements_table.setColumnWidth(10, 80)  # Raw Max
-        self._measurements_table.setColumnWidth(11, 80)  # HU Mean
-        self._measurements_table.setColumnWidth(12, 80)  # HU Std
-        self._measurements_table.setColumnWidth(13, 80)  # HU Min
-        self._measurements_table.setColumnWidth(14, 80)  # HU Max
-        self._measurements_table.setColumnWidth(15, 300)  # Note - wider
-        self._measurements_table.setColumnWidth(16, 60)  # Delete
+        self._measurements_table.setColumnWidth(1, 120)  # Study
+        self._measurements_table.setColumnWidth(2, 150)  # Image Name
+        self._measurements_table.setColumnWidth(3, 40)  # Z
+        self._measurements_table.setColumnWidth(4, 40)  # X
+        self._measurements_table.setColumnWidth(5, 40)  # Y
+        self._measurements_table.setColumnWidth(6, 60)  # Size
+        self._measurements_table.setColumnWidth(7, 80)  # Form
+        self._measurements_table.setColumnWidth(8, 80)  # Raw Mean
+        self._measurements_table.setColumnWidth(9, 80)  # Raw Std
+        self._measurements_table.setColumnWidth(10, 80)  # Raw Min
+        self._measurements_table.setColumnWidth(11, 80)  # Raw Max
+        self._measurements_table.setColumnWidth(12, 80)  # HU Mean
+        self._measurements_table.setColumnWidth(13, 80)  # HU Std
+        self._measurements_table.setColumnWidth(14, 80)  # HU Min
+        self._measurements_table.setColumnWidth(15, 80)  # HU Max
+        self._measurements_table.setColumnWidth(16, 300)  # Note - wider
+        self._measurements_table.setColumnWidth(17, 60)  # Delete
         
         # Export button for measurements
         self._export_measurements_button = QPushButton("Export Measurements (CSV)", self)
@@ -220,9 +225,9 @@ class MainWindow(QMainWindow):
         self._export_region_series_button.clicked.connect(self._on_export_region_series)
         self._export_region_series_button.setEnabled(False)
         
-        # Export button for current window raw pixel data
-        self._export_current_window_button = QPushButton("Export Current Window (Raw CSV)", self)
-        self._export_current_window_button.setToolTip("Export raw pixel data from current table window to CSV")
+        # Export button for current window HU data
+        self._export_current_window_button = QPushButton("Export Current Window (HU)", self)
+        self._export_current_window_button.setToolTip("Export Hounsfield Unit data from current table window to CSV")
         self._export_current_window_button.clicked.connect(self._on_export_current_window)
         self._export_current_window_button.setEnabled(False)
         
@@ -241,9 +246,8 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(8)
         
-        # Top row: Load button + Show Image Window button + current selection
+        # Top row: Show Image Window button + current selection (Load button removed)
         top_layout = QHBoxLayout()
-        top_layout.addWidget(self._load_button, 0)
         top_layout.addWidget(self._show_image_window_button, 0)
         top_layout.addWidget(self._current_selection_label, 1)
         top_layout.addStretch(1)
@@ -253,8 +257,19 @@ class MainWindow(QMainWindow):
         columns_layout.setContentsMargins(0, 0, 0, 0)
         columns_layout.setSpacing(8)
         
-        # Left column: Metadata table (1/3 width)
-        columns_layout.addWidget(self._metadata_table, 1)
+        # Left column: Explorer + Metadata (split vertically, 1/3 width)
+        left_column = QWidget()
+        left_layout = QVBoxLayout(left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(4)
+        
+        # DICOM Explorer (top of left column, minimal height)
+        left_layout.addWidget(self._explorer, 0)
+        
+        # Metadata table (bottom of left column, takes remaining space)
+        left_layout.addWidget(self._metadata_table, 1)
+        
+        columns_layout.addWidget(left_column, 1)
         
         # Right column: Image tabs with image viewer and pixel array table (2/3 width)
         columns_layout.addWidget(self._image_tabs, 2)
@@ -279,24 +294,9 @@ class MainWindow(QMainWindow):
     
     def _connect_signals(self):
         """Connect signals between widgets."""
-        self._load_button.clicked.connect(self._on_load_button_clicked)
+        # Load button removed - explorer signal connected in _create_widgets
         # Navigation and overlay controls are now in external image viewer
         # Connections will be made when viewer is created
-    
-    def _on_load_button_clicked(self):
-        """
-        Handler for Load DICOM Directory button click.
-        Opens file dialog to select directory and loads DICOM files.
-        """
-        # Open directory selection dialog
-        dialog = QFileDialog(self)
-        dialog.setFileMode(QFileDialog.Directory)
-        dialog.setOption(QFileDialog.ShowDirsOnly, True)
-        dialog.setWindowTitle("Select DICOM Directory")
-        
-        if dialog.exec() == QFileDialog.Accepted:
-            directory = Path(dialog.selectedFiles()[0])
-            self._load_dicom_directory(directory)
     
     def _load_dicom_directory(self, directory: Path):
         """
@@ -306,11 +306,9 @@ class MainWindow(QMainWindow):
             directory: Path to directory containing DICOM files
         """
         try:
-            # Clear previous state
+            # Clear previous state (but NOT measurements - they are preserved)
             self._metadata_table.clear()
             self._image_tabs.clear()
-            self._measurements = []
-            self._update_measurements_table()
             self._export_current_window_button.setEnabled(False)
             self._export_region_series_button.setEnabled(False)
             self._current_directory = directory
@@ -330,7 +328,22 @@ class MainWindow(QMainWindow):
                     f"No image files found in:\n{directory}"
                 )
                 self._current_selection_label.setText(f"No images in: {directory.name}")
+                # Clear study UIDs since no images loaded
+                self._current_study_uid = ''
+                self._current_series_uid = ''
                 return
+            
+            # Store current study/series UIDs for linking new measurements
+            if self._image_files[0].dataset:
+                ds = self._image_files[0].dataset
+                self._current_study_uid = getattr(ds, 'StudyInstanceUID', 'Unknown')
+                self._current_series_uid = getattr(ds, 'SeriesInstanceUID', 'Unknown')
+            else:
+                self._current_study_uid = 'Unknown'
+                self._current_series_uid = 'Unknown'
+            
+            # Update measurements table to reflect current study
+            self._update_measurements_table()
             
             # Display the first image
             self._display_dicom_file(self._image_files[0])
@@ -488,12 +501,28 @@ class MainWindow(QMainWindow):
         Args:
             measurement: Dictionary containing measurement data
         """
-        # Add image filename to measurement based on z index
-        z_index = measurement.get('z', 0)
-        if 0 <= z_index < len(self._image_files):
-            measurement['image_name'] = self._image_files[z_index].filepath.name
+        # Add image filename to measurement based on physical Z coordinate
+        z_physical = measurement.get('z', 0.0)
+        # Find the image file with matching Z coordinate
+        for img_file in self._image_files:
+            img_z = img_file.image_coordinates.get('z', 0.0)
+            if abs(img_z - z_physical) < 0.001:  # Floating point comparison with tolerance
+                measurement['image_name'] = img_file.filepath.name
+                break
         else:
             measurement['image_name'] = ''
+        
+        # Add study/series linking information
+        if self._current_dicom_file and self._current_dicom_file.dataset:
+            ds = self._current_dicom_file.dataset
+            measurement['study_uid'] = getattr(ds, 'StudyInstanceUID', 'Unknown')
+            measurement['series_uid'] = getattr(ds, 'SeriesInstanceUID', 'Unknown')
+            measurement['study_description'] = getattr(ds, 'StudyDescription', '') or getattr(ds, 'StudyID', '')
+        else:
+            # Fallback to current study UIDs if available
+            measurement['study_uid'] = self._current_study_uid if self._current_study_uid else 'Unknown'
+            measurement['series_uid'] = self._current_series_uid if self._current_series_uid else 'Unknown'
+            measurement['study_description'] = ''
         
         # Add to measurements list
         self._measurements.append(measurement)
@@ -516,8 +545,8 @@ class MainWindow(QMainWindow):
             row: Row index of the changed cell
             column: Column index of the changed cell
         """
-        # Only handle changes in the Note column (column 15)
-        if column == 15 and 0 <= row < len(self._measurements):
+        # Only handle changes in the Note column (column 16)
+        if column == 16 and 0 <= row < len(self._measurements):
             item = self._measurements_table.item(row, column)
             if item is not None:
                 # Update the note in the measurement dictionary
@@ -534,7 +563,7 @@ class MainWindow(QMainWindow):
         """
         if 0 <= row < len(self._measurements):
             # Handle Delete column
-            if column == 16:
+            if column == 17:
                 # Remove the measurement from the list
                 self._measurements.pop(row)
                 # Update the table
@@ -552,11 +581,18 @@ class MainWindow(QMainWindow):
         
         The measurement's x,y are the CENTER of the window.
         This converts them to top-left corner coordinates and sets the window.
+        Only applies if the measurement belongs to the current study.
         
         Args:
-            measurement: Measurement dictionary with x, y, cursor_size, is_circle
+            measurement: Measurement dictionary with x, y, cursor_size, is_circle, study_uid
         """
         if not hasattr(self, '_image_tabs') or self._image_tabs is None:
+            return
+        
+        # Skip if measurement is from a different study
+        measurement_study_uid = measurement.get('study_uid', '')
+        if measurement_study_uid and measurement_study_uid != self._current_study_uid:
+            # Measurement belongs to a different study - do not apply
             return
         
         pixel_table = self._image_tabs.pixel_array_table
@@ -650,7 +686,7 @@ class MainWindow(QMainWindow):
                     row = [
                         str(i + 1),  # Index
                         str(m.get('image_name', '')),  # Image Name
-                        str(m.get('z', '')),  # Z index
+                        f"{m.get('z', 0.0):.2f}",  # Z physical coordinate
                         str(m.get('x', '')),
                         str(m.get('y', '')),
                         str(m.get('cursor_size', '')),
@@ -732,24 +768,31 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export Failed", "Failed to export region statistics to CSV.")
     
     def _on_export_current_window(self):
-        """Export raw pixel data from current table window to CSV.
+        """Export Hounsfield Unit (HU) data from current table window to CSV.
         
         CSV format:
         - Header row: column numbers
         - First column: row numbers  
-        - Data: raw pixel values from current window
+        - Data: HU values from current window
         """
         # Get the pixel array table
         pixel_table = self._image_tabs.pixel_array_table
         
-        if pixel_table._pixel_array is None:
+        if pixel_table._pixel_array is None or pixel_table._dataset is None:
             QMessageBox.information(self, "No Data", "No pixel data loaded to export.")
             return
+        
+        # Get HU conversion parameters
+        slope = getattr(pixel_table._dataset, 'RescaleSlope', 1.0)
+        intercept = getattr(pixel_table._dataset, 'RescaleIntercept', 0.0)
+        
+        # If no HU conversion available, use raw values
+        has_hu = slope != 1.0 or intercept != 0.0
         
         # Get save file path
         file_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Current Window (Raw)",
+            "Export Current Window (HU)",
             "",
             "CSV Files (*.csv);;All Files (*)"
         )
@@ -810,20 +853,24 @@ class MainWindow(QMainWindow):
                 
                 if is_flattened and region.ndim == 1:
                     # Circle mode: flattened 1D array
-                    # Export as single column with row indices
-                    header = ['Index', 'Pixel Value']
+                    # Export as single column with HU values
+                    header = ['Index', 'HU Value']
                     writer.writerow(header)
                     for idx, value in enumerate(region):
-                        writer.writerow([str(idx), str(int(value))])
+                        hu_value = float(value) * slope + intercept
+                        writer.writerow([str(idx), f"{hu_value:.2f}"])
                 else:
                     # Standard 2D array export
                     # Header: Row + column numbers
                     header = ['Row'] + [str(j) for j in range(win_x, win_x + region.shape[1])]
                     writer.writerow(header)
                     
-                    # Data rows: row number + pixel values
+                    # Data rows: row number + HU values
                     for row_idx in range(region.shape[0]):
-                        row_data = [str(win_y + row_idx)] + [str(int(region[row_idx, col_idx])) for col_idx in range(region.shape[1])]
+                        row_data = [str(win_y + row_idx)]
+                        for col_idx in range(region.shape[1]):
+                            hu_value = float(region[row_idx, col_idx]) * slope + intercept
+                            row_data.append(f"{hu_value:.2f}")
                         writer.writerow(row_data)
             
             QMessageBox.information(self, "Export Successful", f"Current window exported to:\n{file_path}")
@@ -842,59 +889,67 @@ class MainWindow(QMainWindow):
             # Column 0: Index
             self._measurements_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
             
-            # Column 1: Image Name
-            self._measurements_table.setItem(i, 1, QTableWidgetItem(str(m.get('image_name', ''))))
+            # Column 1: Study (shortened display)
+            study_desc = m.get('study_description', '')
+            study_uid = m.get('study_uid', '')
+            study_text = study_desc if study_desc else study_uid[:8] if study_uid else 'Unknown'
+            self._measurements_table.setItem(i, 1, QTableWidgetItem(str(study_text)))
+            self._measurements_table.item(i, 1).setToolTip(f"Study: {study_uid}\nSeries: {m.get('series_uid', '')}")
             
-            # Column 2: Z index
-            self._measurements_table.setItem(i, 2, QTableWidgetItem(str(m.get('z', 0))))
+            # Column 2: Image Name
+            self._measurements_table.setItem(i, 2, QTableWidgetItem(str(m.get('image_name', ''))))
             
-            # Column 3: X position
-            self._measurements_table.setItem(i, 3, QTableWidgetItem(str(m.get('x', 0))))
+            # Column 3: Z (physical coordinate)
+            z_val = m.get('z', 0.0)
+            self._measurements_table.setItem(i, 3, QTableWidgetItem(f"{z_val:.2f}"))
             
-            # Column 4: Y position
-            self._measurements_table.setItem(i, 4, QTableWidgetItem(str(m.get('y', 0))))
+            # Column 4: X position
+            self._measurements_table.setItem(i, 4, QTableWidgetItem(str(m.get('x', 0))))
             
-            # Column 5: Cursor Size
-            self._measurements_table.setItem(i, 5, QTableWidgetItem(str(m.get('cursor_size', 0))))
+            # Column 5: Y position
+            self._measurements_table.setItem(i, 5, QTableWidgetItem(str(m.get('y', 0))))
             
-            # Column 6: Form (Circle/Rectangle)
+            # Column 6: Cursor Size
+            self._measurements_table.setItem(i, 6, QTableWidgetItem(str(m.get('cursor_size', 0))))
+            
+            # Column 7: Form (Circle/Rectangle)
             form = "Circle" if m.get('is_circle', False) else "Rectangle"
-            self._measurements_table.setItem(i, 6, QTableWidgetItem(form))
+            self._measurements_table.setItem(i, 7, QTableWidgetItem(form))
             
-            # Column 7: Raw Mean
-            self._measurements_table.setItem(i, 7, QTableWidgetItem(f"{m.get('raw_mean', 0):.2f}"))
+            # Column 8: Raw Mean
+            self._measurements_table.setItem(i, 8, QTableWidgetItem(f"{m.get('raw_mean', 0):.2f}"))
             
-            # Column 8: Raw Std
-            self._measurements_table.setItem(i, 8, QTableWidgetItem(f"{m.get('raw_std', 0):.2f}"))
+            # Column 9: Raw Std
+            self._measurements_table.setItem(i, 9, QTableWidgetItem(f"{m.get('raw_std', 0):.2f}"))
             
-            # Column 9: Raw Min
-            self._measurements_table.setItem(i, 9, QTableWidgetItem(f"{m.get('raw_min', 0):.2f}"))
+            # Column 10: Raw Min
+            self._measurements_table.setItem(i, 10, QTableWidgetItem(f"{m.get('raw_min', 0):.2f}"))
             
-            # Column 10: Raw Max
-            self._measurements_table.setItem(i, 10, QTableWidgetItem(f"{m.get('raw_max', 0):.2f}"))
+            # Column 11: Raw Max
+            self._measurements_table.setItem(i, 11, QTableWidgetItem(f"{m.get('raw_max', 0):.2f}"))
             
-            # Column 11: HU Mean
-            self._measurements_table.setItem(i, 11, QTableWidgetItem(f"{m.get('hu_mean', 0):.2f}"))
+            # Column 12: HU Mean
+            self._measurements_table.setItem(i, 12, QTableWidgetItem(f"{m.get('hu_mean', 0):.2f}"))
             
-            # Column 12: HU Std
-            self._measurements_table.setItem(i, 12, QTableWidgetItem(f"{m.get('hu_std', 0):.2f}"))
+            # Column 13: HU Std
+            self._measurements_table.setItem(i, 13, QTableWidgetItem(f"{m.get('hu_std', 0):.2f}"))
             
-            # Column 13: HU Min
-            self._measurements_table.setItem(i, 13, QTableWidgetItem(f"{m.get('hu_min', 0):.2f}"))
+            # Column 14: HU Min
+            self._measurements_table.setItem(i, 14, QTableWidgetItem(f"{m.get('hu_min', 0):.2f}"))
             
-            # Column 14: HU Max
-            self._measurements_table.setItem(i, 14, QTableWidgetItem(f"{m.get('hu_max', 0):.2f}"))
+            # Column 15: HU Max
+            self._measurements_table.setItem(i, 15, QTableWidgetItem(f"{m.get('hu_max', 0):.2f}"))
             
-            # Column 15: Note (editable)
+            # Column 16: Note (editable)
             note_item = QTableWidgetItem(m.get('note', ''))
             note_item.setFlags(note_item.flags() | Qt.ItemFlag.ItemIsEditable)
-            self._measurements_table.setItem(i, 15, note_item)
+            self._measurements_table.setItem(i, 16, note_item)
             
-            # Column 16: Delete button
+            # Column 17: Delete button
             delete_item = QTableWidgetItem("Delete")
             delete_item.setForeground(QColor(200, 0, 0))
             delete_item.setToolTip("Click to delete this measurement")
-            self._measurements_table.setItem(i, 16, delete_item)
+            self._measurements_table.setItem(i, 17, delete_item)
     
 
     
