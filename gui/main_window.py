@@ -699,10 +699,8 @@ class MainWindow(QMainWindow):
             
             # Set row in title - use absolute Y position (window start + selected row)
             absolute_row = win_y + selected_row * factor
-            self._curve_view.set_row(absolute_row)
-            
-            # Update row range in curve view
             self._curve_view.set_row_range(0, len(zoomed) - 1)
+            self._curve_view.set_row(selected_row, absolute_row)
             
             self._curve_view.set_data(x_values, hu_values)
             
@@ -753,10 +751,8 @@ class MainWindow(QMainWindow):
             
             # Set row in title - use absolute Y position
             absolute_row = win_y + selected_row
-            self._curve_view.set_row(absolute_row)
-            
-            # Update row range in curve view (0 to window_height - 1)
             self._curve_view.set_row_range(0, max(0, region.shape[0] - 1))
+            self._curve_view.set_row(selected_row, absolute_row)
             
             self._curve_view.set_data(x_values, hu_values)
     

@@ -218,17 +218,23 @@ class CurveView(QWidget):
         if self._row_spin:
             self._row_spin.setRange(min_row, max_row)
     
-    def set_row(self, row: int):
+    def set_row(self, row: int, absolute_row: int = None):
         """Set the row number displayed in the chart title.
         
         Args:
-            row: The y-coordinate (row) of the data being displayed
+            row: The relative row index within the window (0 = first row)
+            absolute_row: The absolute y-coordinate in the image. If None, uses row.
         """
         self._current_row = row
         if self._row_spin:
+            # Use blockSignals to prevent feedback loop
+            self._row_spin.blockSignals(True)
             self._row_spin.setValue(row)
+            self._row_spin.blockSignals(False)
         if self._chart:
-            self._chart.setTitle(f"HU Profile (Row: {row})")
+            # Display absolute row if provided, otherwise use relative row
+            display_row = absolute_row if absolute_row is not None else row
+            self._chart.setTitle(f"HU Profile (Row: {display_row})")
     
     def set_data(self, x_values: List[float], y_values: List[float]):
         """
@@ -313,8 +319,8 @@ class CurveView(QWidget):
         if self._axis_y:
             self._axis_y.setRange(0, 1)
         
-        # Reset row in title
+        # Reset row in title but keep spinbox value
+        # (spinbox is controlled by the window, not by data clearing)
         if self._chart:
             self._chart.setTitle("HU Profile (Row: 0)")
-        if self._row_spin:
-            self._row_spin.setValue(0)
+        self._current_row = 0

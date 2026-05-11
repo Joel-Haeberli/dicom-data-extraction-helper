@@ -2,15 +2,29 @@
 
 During my civil service at the University Hospital Insel in Bern, I got the task of analyzing the anonymization process of patient data. To support this process and make analysis easier in the future, I implemented a few small helper tools, which can save a lot of time during the analysis of such profiles.
 
-The repository at the moment contains two tools: 
+The repository at the moment contains three tools: 
 
-1. [DICOM Header Extraction Tool](#dicom-data-extraction-helper). Simply extracts DICOM headers and writes them to stdout or a specified file.
+1. [DICOM Analysis and Raw Data Extraction Tool](#dicom-analysis-and-raw-data-extraction-tool)
+
+2. [DICOM Header Extraction Tool](#dicom-data-extraction-helper). Simply extracts DICOM headers and writes them to stdout or a specified file.
     
     1.1 usage: `python3 dicom_header_extractor.py -h`
 
-2. [Anonymization Profile Analysis Tool](#anonymization-profile-analysis-tool). CSV based anonymization profile analyzer which can help to automatically analyze and compare anonymization profiles.
+3. [Anonymization Profile Analysis Tool](#anonymization-profile-analysis-tool). CSV based anonymization profile analyzer which can help to automatically analyze and compare anonymization profiles.
    
     2.1 usage: `python3 main.py`
+
+# DICOM Analysis and Raw Data Extraction Tool
+
+Load a DICOM folder from the built-in explorer, choose ROI using a circle or a rectangle, measure multiple regions and export everything in CSV format.
+
+The GUI is packaged for Linux and Windows. Get the latest release here: [latest release](https://github.com/Joel-Haeberli/dicom-data-extraction-helper/releases/latest)
+
+Have fun! Here's a screenshot:
+
+![Screenshot of the GUI](gui_screenshot.png)
+
+Disclaimer: It is a toy. It can do a lot of things and is operating on raw data which makes it super usable but keep in mind it was primarily generated and not a lot of time was put into it. If you find issues or have questions, do not hesitate to open an issue :)
 
 # DICOM Header Extraction Tool
 
