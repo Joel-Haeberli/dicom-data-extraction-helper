@@ -51,6 +51,10 @@ class PixelArrayModel(QAbstractTableModel):
         self._window_y = 0
         self._window_width = 0  # 0 means use full width
         self._window_height = 0  # 0 means use full height
+        # Zoom settings
+        self._zoom_factor = 1
+        self._original_window_x = 0
+        self._original_window_y = 0
         # Highlight settings for statistics region (circle or rectangle)
         self._highlight_circle = False  # False = rectangle (all cells), True = circle
         self._circle_diameter = 0  # Diameter of circle in cells
@@ -125,6 +129,10 @@ class PixelArrayModel(QAbstractTableModel):
         
         elif role == Qt.BackgroundRole:
             # Highlight cells used for statistics calculation
+            # Skip highlighting when zoom factor > 1 (shows averaged chunks, not individual pixels)
+            if self._zoom_factor > 1:
+                return None
+            
             if (actual_row < arr.shape[0] and actual_col < arr.shape[1] and
                 self._pixel_array is not None):
                 # Check if this cell is within the statistics region
@@ -186,15 +194,42 @@ class PixelArrayModel(QAbstractTableModel):
         if role == Qt.DisplayRole:
             if orientation == Qt.Horizontal:
                 # Column headers are relative to window
-                return str(self._window_x + section)
+                if self._zoom_factor > 1:
+                    # Show range for zoomed display
+                    start = self._original_window_x + section * self._zoom_factor
+                    end = start + self._zoom_factor - 1
+                    return f"{start}-{end}"
+                else:
+                    return str(self._window_x + section)
             elif orientation == Qt.Vertical:
                 # Row headers are relative to window
-                return str(self._window_y + section)
+                if self._zoom_factor > 1:
+                    # Show range for zoomed display
+                    start = self._original_window_y + section * self._zoom_factor
+                    end = start + self._zoom_factor - 1
+                    return f"{start}-{end}"
+                else:
+                    return str(self._window_y + section)
         return None
     
     def update_data(self, pixel_array: np.ndarray, show_hu: bool, slope: float, intercept: float,
-                    window_x: int = 0, window_y: int = 0, window_width: int = 0, window_height: int = 0):
-        """Update the model with new data and window settings."""
+                    window_x: int = 0, window_y: int = 0, window_width: int = 0, window_height: int = 0,
+                    zoom_factor: int = 1, original_window_x: int = 0, original_window_y: int = 0):
+        """Update the model with new data and window settings.
+        
+        Args:
+            pixel_array: The pixel data array
+            show_hu: Whether to display HU values
+            slope: Rescale slope for HU conversion
+            intercept: Rescale intercept for HU conversion
+            window_x: Window X position
+            window_y: Window Y position
+            window_width: Window width
+            window_height: Window height
+            zoom_factor: Zoom factor for averaging (1 = no zoom)
+            original_window_x: Original window X before zoom (for range labels)
+            original_window_y: Original window Y before zoom (for range labels)
+        """
         # Check if pixel array changed (structural change)
         array_changed = self._pixel_array is not pixel_array
         if not array_changed and pixel_array is not None and self._pixel_array is not None:
@@ -204,7 +239,8 @@ class PixelArrayModel(QAbstractTableModel):
         window_changed = (self._window_x != window_x or 
                          self._window_y != window_y or 
                          self._window_width != window_width or 
-                         self._window_height != window_height)
+                         self._window_height != window_height or
+                         self._zoom_factor != zoom_factor)
         
         # Check if display settings changed (HU toggle, slope, intercept)
         display_changed = (self._show_hu != show_hu or 
@@ -220,6 +256,9 @@ class PixelArrayModel(QAbstractTableModel):
         self._window_y = window_y
         self._window_width = window_width
         self._window_height = window_height
+        self._zoom_factor = zoom_factor
+        self._original_window_x = original_window_x
+        self._original_window_y = original_window_y
         
         if array_changed or window_changed:
             # Structural change - reset model
@@ -894,6 +933,14 @@ class PixelArrayTable(QWidget):
         self._window_width: int = 30
         self._window_height: int = 30
         
+        # Zoom factor settings
+        self._zoom_factor: int = 1
+        self._zoomed_table: Optional[np.ndarray] = None
+        self._zoom_chunks_x: int = 0
+        self._zoom_chunks_y: int = 0
+        self._zoom_factor_spin: Optional[QSpinBox] = None
+        self._updating_zoom: bool = False  # Flag to prevent reentrant updates
+        
         # Cursor window size (configurable, default 7x7)
         self._cursor_window_size: int = 7
         self._cursor_size_spin: Optional[QSpinBox] = None
@@ -1000,6 +1047,9 @@ class PixelArrayTable(QWidget):
         # Update models without triggering signal loop
         # (don't call _on_window_changed as it would update spin boxes again)
         self._update_models()
+        
+        # Emit window changed signal to update curve
+        self.window_changed.emit()
     
     def _update_statistics(self):
         """Calculate statistics for the current window (Raw and HU) and pass to external viewer.
@@ -1292,6 +1342,9 @@ Max: {stats['hu_max']:8.2f}"""
             self._win_height_spin.setValue(win_h)
             self._update_highlight_region()
             self._update_models()
+            
+            # Emit window changed signal to update curve
+            self.window_changed.emit()
     
     def _setup_ui(self):
         """Setup the widget layout."""
@@ -1316,6 +1369,15 @@ Max: {stats['hu_max']:8.2f}"""
         window_layout = QHBoxLayout()
         window_layout.setContentsMargins(0, 0, 0, 0)
         window_layout.setSpacing(8)
+        
+        # Zoom factor control (top left)
+        window_layout.addWidget(QLabel("Zoom:", self))
+        self._zoom_factor_spin = QSpinBox(self)
+        self._zoom_factor_spin.setRange(1, 20)
+        self._zoom_factor_spin.setValue(1)
+        self._zoom_factor_spin.setToolTip("Zoom factor for pixel averaging")
+        self._zoom_factor_spin.valueChanged.connect(self._on_zoom_factor_changed)
+        window_layout.addWidget(self._zoom_factor_spin)
         
         # Window position controls
         window_layout.addWidget(QLabel("Window:", self))
@@ -1367,7 +1429,7 @@ Max: {stats['hu_max']:8.2f}"""
         window_layout.addWidget(QLabel("Cursor:", self))
         self._cursor_size_spin = QSpinBox(self)
         self._cursor_size_spin.setMinimum(1)
-        self._cursor_size_spin.setMaximum(50)
+        self._cursor_size_spin.setMaximum(10000)
         self._cursor_size_spin.setValue(7)
         self._cursor_size_spin.setToolTip("Cursor window size (odd number recommended for centering)")
         self._cursor_size_spin.valueChanged.connect(self._on_cursor_window_size_changed)
@@ -1629,6 +1691,10 @@ Max: {stats['hu_max']:8.2f}"""
     
     def _on_window_changed(self):
         """Handler for window position/size spin box changes."""
+        # Skip if we're in the middle of a zoom update
+        if self._updating_zoom:
+            return
+            
         self._window_x = self._win_x_spin.value()
         self._window_y = self._win_y_spin.value()
         self._window_width = self._win_width_spin.value()
@@ -1654,6 +1720,137 @@ Max: {stats['hu_max']:8.2f}"""
             # Still update stats even if no dataset (to show empty state)
             self._update_statistics()
     
+    def _adjust_window_for_zoom(self, factor: int):
+        """Adjust window dimensions to be divisible by zoom factor.
+        
+        Args:
+            factor: Zoom factor (must be >= 1)
+            
+        Returns:
+            Tuple of (adjusted_width, adjusted_height)
+        """
+        if factor <= 1:
+            return self._window_width, self._window_height
+        
+        w = self._window_width
+        h = self._window_height
+        
+        # Calculate next bigger values divisible by factor
+        if w % factor != 0:
+            new_w = w + (factor - w % factor)
+        else:
+            new_w = w
+        
+        if h % factor != 0:
+            new_h = h + (factor - h % factor)
+        else:
+            new_h = h
+        
+        # Clamp to array bounds
+        arr = self._pixel_array[0] if self._pixel_array.ndim == 3 else self._pixel_array
+        if arr is not None:
+            cols = arr.shape[1]
+            rows = arr.shape[0]
+            max_w = cols - self._window_x
+            max_h = rows - self._window_y
+            new_w = min(new_w, max_w)
+            new_h = min(new_h, max_h)
+            
+            # After clamping, ensure still divisible by factor (round down)
+            if new_w % factor != 0:
+                new_w = (new_w // factor) * factor
+            if new_h % factor != 0:
+                new_h = (new_h // factor) * factor
+        
+        return new_w, new_h
+    
+    def _calculate_zoomed_table(self) -> Optional[np.ndarray]:
+        """Calculate zoomed (averaged) table based on current window and zoom factor.
+        
+        Returns:
+            2D numpy array with averaged HU values, or None if not applicable
+        """
+        if (self._pixel_array is None or self._dataset is None or 
+            self._window_width <= 0 or self._window_height <= 0):
+            return None
+        
+        factor = self._zoom_factor
+        if factor <= 1:
+            return None
+        
+        arr = self._pixel_array[0] if self._pixel_array.ndim == 3 else self._pixel_array
+        
+        # Calculate chunk dimensions based on actual window size
+        # Round down to ensure divisibility
+        chunks_x = (self._window_width // factor)
+        chunks_y = (self._window_height // factor)
+        
+        if chunks_x == 0 or chunks_y == 0:
+            return None
+        
+        # Adjust actual window to be divisible by factor
+        actual_w = chunks_x * factor
+        actual_h = chunks_y * factor
+        
+        # Extract window region (use adjusted size)
+        region = arr[
+            self._window_y:self._window_y + actual_h,
+            self._window_x:self._window_x + actual_w
+        ]
+        
+        if region.size == 0 or region.shape != (actual_h, actual_w):
+            return None
+        
+        # Apply HU conversion
+        slope = getattr(self._dataset, 'RescaleSlope', 1.0)
+        intercept = getattr(self._dataset, 'RescaleIntercept', 0.0)
+        
+        # Reshape to (chunks_y, factor, chunks_x, factor)
+        chunked = region.reshape(chunks_y, factor, chunks_x, factor)
+        
+        # Calculate mean for each chunk
+        averaged = np.mean(chunked, axis=(1, 3))
+        
+        # Apply HU conversion
+        hu_averaged = averaged * slope + intercept
+        
+        self._zoom_chunks_x = chunks_x
+        self._zoom_chunks_y = chunks_y
+        
+        return hu_averaged
+    
+    def _on_zoom_factor_changed(self, value: int):
+        """Handler for zoom factor spinbox changes."""
+        self._zoom_factor = value
+        
+        # Set flag to prevent _on_window_changed from interfering
+        self._updating_zoom = True
+        
+        try:
+            if value > 1:
+                new_w, new_h = self._adjust_window_for_zoom(value)
+                
+                # Update internal state first
+                self._window_width = new_w
+                self._window_height = new_h
+                
+                # Update spinboxes - this will trigger _on_window_changed but it will be skipped
+                self._win_width_spin.setValue(new_w)
+                self._win_height_spin.setValue(new_h)
+            else:
+                # Zoom = 1, reset to original
+                self._zoomed_table = None
+            
+            # Update display
+            # _update_models will recalculate zoomed table if needed
+            self._update_highlight_region()
+            self._update_models()
+            
+            # Emit window changed to update curve
+            self.window_changed.emit()
+        finally:
+            self._updating_zoom = False
+    
     def _update_models(self):
         """Update both models with current pixel data and settings."""
         if self._pixel_array is None or self._dataset is None:
@@ -1669,25 +1866,55 @@ Max: {stats['hu_max']:8.2f}"""
                 rows, cols = 0, 0
             
             photo = getattr(self._dataset, 'PhotometricInterpretation', 'N/A')
-            self._photo_label.setText(f"Photometric Interpretation: {photo} ({rows}x{cols})")
+            
+            # Recalculate zoomed table if needed
+            if self._zoom_factor > 1:
+                self._zoomed_table = self._calculate_zoomed_table()
+            
+            # If using zoom, show zoomed dimensions
+            if self._zoom_factor > 1 and self._zoomed_table is not None:
+                zoom_rows = self._zoom_chunks_y
+                zoom_cols = self._zoom_chunks_x
+                self._photo_label.setText(f"Photometric Interpretation: {photo} ({zoom_cols}x{zoom_rows} zoomed by {self._zoom_factor})")
+            else:
+                self._photo_label.setText(f"Photometric Interpretation: {photo} ({cols}x{rows})")
             
             # Update highlight region before updating models
             self._update_highlight_region()
             
-            # Update both models
-            self._raw_model.update_data(self._pixel_array, False, 1.0, 0.0,
-                                        self._window_x, self._window_y,
-                                        self._window_width, self._window_height)
-            
-            if self._has_hu:
-                self._hu_model.update_data(self._pixel_array, True, self._slope, self._intercept,
-                                            self._window_x, self._window_y,
-                                            self._window_width, self._window_height)
+            # Update both models with zoomed data if available
+            if self._zoom_factor > 1 and self._zoomed_table is not None:
+                # Use zoomed table as the "pixel array" and full window
+                # The zoomed table already has HU values applied
+                # Raw model shows the same as HU model since zoomed table is already in HU
+                self._raw_model.update_data(
+                    self._zoomed_table, False, 1.0, 0.0,
+                    0, 0, self._zoom_chunks_x, self._zoom_chunks_y,
+                    self._zoom_factor, self._window_x, self._window_y
+                )
+                self._hu_model.update_data(
+                    self._zoomed_table, True, 1.0, 0.0,
+                    0, 0, self._zoom_chunks_x, self._zoom_chunks_y,
+                    self._zoom_factor, self._window_x, self._window_y
+                )
             else:
-                # If no HU conversion available, show raw values in HU tab too
-                self._hu_model.update_data(self._pixel_array, False, 1.0, 0.0,
+                # Original behavior: use full pixel array with window
+                self._raw_model.update_data(self._pixel_array, False, 1.0, 0.0,
                                             self._window_x, self._window_y,
-                                            self._window_width, self._window_height)
+                                            self._window_width, self._window_height,
+                                            1, self._window_x, self._window_y)
+                
+                if self._has_hu:
+                    self._hu_model.update_data(self._pixel_array, True, self._slope, self._intercept,
+                                                self._window_x, self._window_y,
+                                                self._window_width, self._window_height,
+                                                1, self._window_x, self._window_y)
+                else:
+                    # If no HU conversion available, show raw values in HU tab too
+                    self._hu_model.update_data(self._pixel_array, False, 1.0, 0.0,
+                                                self._window_x, self._window_y,
+                                                self._window_width, self._window_height,
+                                                1, self._window_x, self._window_y)
             
             # Update statistics
             self._update_statistics()
@@ -1703,8 +1930,8 @@ Max: {stats['hu_max']:8.2f}"""
             self._raw_model.set_highlight_region(False, 0, 0, 0, 0, 0)
         if self._hu_model is not None:
             self._hu_model.set_highlight_region(False, 0, 0, 0, 0, 0)
-        self._raw_model.update_data(None, False, 1.0, 0.0, 0, 0, 0, 0)
-        self._hu_model.update_data(None, False, 1.0, 0.0, 0, 0, 0, 0)
+        self._raw_model.update_data(None, False, 1.0, 0.0, 0, 0, 0, 0, 1, 0, 0)
+        self._hu_model.update_data(None, False, 1.0, 0.0, 0, 0, 0, 0, 1, 0, 0)
         self._pixel_array = None
         self._update_statistics()
     
@@ -1748,6 +1975,15 @@ Max: {stats['hu_max']:8.2f}"""
         self._dataset = None
         self._measurement_mode_enabled = True
         self._cursor_mode_circle = True  # Reset to circle mode
+        
+        # Reset zoom factor
+        self._zoom_factor = 1
+        self._zoomed_table = None
+        self._zoom_chunks_x = 0
+        self._zoom_chunks_y = 0
+        self._updating_zoom = False
+        if self._zoom_factor_spin:
+            self._zoom_factor_spin.setValue(1)
         
         # Clear external viewer
         if self._image_viewer is not None:

@@ -65,6 +65,7 @@ class MainWindow(QMainWindow):
         self._current_study_uid: str = ''  # Current study UID for linking measurements
         self._current_series_uid: str = ''  # Current series UID for linking measurements
         self._image_viewer_window = None  # Reference to external image viewer window
+        self._current_curve_row: int = 0  # Current row selected for HU profile curve
         
         # Create UI
         self._create_widgets()
@@ -82,6 +83,9 @@ class MainWindow(QMainWindow):
         self._image_tabs.pixel_array_table.add_measurement_requested.connect(self._on_add_measurement)
         self._image_tabs.pixel_array_table.viewer_reopened.connect(self._on_viewer_reopened)
         self._image_tabs.pixel_array_table.window_changed.connect(self._update_curve_from_window)
+        
+        # Connect curve view row changed signal
+        self._curve_view.row_changed.connect(self._on_curve_row_changed)
         
         # Initial state
         self._update_current_selection()
@@ -650,53 +654,111 @@ class MainWindow(QMainWindow):
         # Emit window changed signal to update curve
         pixel_table.window_changed.emit()
     
+    def _on_curve_row_changed(self, row: int):
+        """Handler for curve view row selector changes.
+        
+        Args:
+            row: The newly selected row index (relative to window)
+        """
+        self._current_curve_row = row
+        # Trigger curve update with the new row
+        self._update_curve_from_window()
+    
     def _update_curve_from_window(self):
-        """Update curve view with first row of current window."""
+        """Update curve view with the selected row of current window (or zoomed table)."""
         if not hasattr(self, '_curve_view') or self._curve_view is None:
             return
         
         pixel_table = self._image_tabs.pixel_array_table
-        if pixel_table is None or pixel_table._pixel_array is None:
+        if pixel_table is None:
             self._curve_view.clear()
             return
         
-        # Get current window
-        win_x = pixel_table._window_x
-        win_y = pixel_table._window_y
-        win_w = pixel_table._window_width
-        win_h = pixel_table._window_height
+        # Get the selected row (relative to window, defaults to 0)
+        selected_row = self._current_curve_row if hasattr(self, '_current_curve_row') else 0
         
-        # Get pixel array
-        arr = pixel_table._pixel_array[0] if pixel_table._pixel_array.ndim == 3 else pixel_table._pixel_array
-        
-        # Clamp window to array bounds
-        rows = arr.shape[0]
-        cols = arr.shape[1]
-        win_x = max(0, min(win_x, cols - 1))
-        win_y = max(0, min(win_y, rows - 1))
-        win_w = max(1, min(win_w, cols - win_x))
-        win_h = max(1, min(win_h, rows - win_y))
-        
-        # Extract first row of window
-        region = arr[win_y:win_y + win_h, win_x:win_x + win_w]
-        if region.size == 0:
-            self._curve_view.clear()
-            return
-        
-        row_data = region[0]  # First row
-        
-        # Get HU conversion parameters
-        slope = getattr(pixel_table._dataset, 'RescaleSlope', 1.0) if pixel_table._dataset else 1.0
-        intercept = getattr(pixel_table._dataset, 'RescaleIntercept', 0.0) if pixel_table._dataset else 0.0
-        
-        # Convert to HU
-        hu_values = [float(v) * slope + intercept for v in row_data]
-        
-        # X values (absolute pixel positions)
-        x_values = [win_x + i for i in range(len(row_data))]
-        
-        # Update curve
-        self._curve_view.set_data(x_values, hu_values)
+        # Use zoomed table if available and zoom > 1
+        if pixel_table._zoom_factor > 1 and pixel_table._zoomed_table is not None:
+            zoomed = pixel_table._zoomed_table
+            
+            # Clamp selected row to valid range
+            if selected_row < 0:
+                selected_row = 0
+            if selected_row >= len(zoomed):
+                selected_row = max(0, len(zoomed) - 1)
+            
+            row_data = zoomed[selected_row]
+            
+            # X values are center positions of each chunk
+            factor = pixel_table._zoom_factor
+            win_x = pixel_table._window_x
+            win_y = pixel_table._window_y
+            x_values = [win_x + i * factor + factor / 2.0 for i in range(len(row_data))]
+            
+            hu_values = list(row_data)
+            
+            # Set row in title - use absolute Y position (window start + selected row)
+            absolute_row = win_y + selected_row * factor
+            self._curve_view.set_row(absolute_row)
+            
+            # Update row range in curve view
+            self._curve_view.set_row_range(0, len(zoomed) - 1)
+            
+            self._curve_view.set_data(x_values, hu_values)
+            
+        else:
+            # Original logic for factor = 1 (no zoom)
+            if pixel_table._pixel_array is None:
+                self._curve_view.clear()
+                return
+            
+            arr = pixel_table._pixel_array[0] if pixel_table._pixel_array.ndim == 3 else pixel_table._pixel_array
+            
+            win_x = pixel_table._window_x
+            win_y = pixel_table._window_y
+            win_w = pixel_table._window_width
+            win_h = pixel_table._window_height
+            
+            # Clamp window to array bounds
+            rows = arr.shape[0]
+            cols = arr.shape[1]
+            win_x = max(0, min(win_x, cols - 1))
+            win_y = max(0, min(win_y, rows - 1))
+            win_w = max(1, min(win_w, cols - win_x))
+            win_h = max(1, min(win_h, rows - win_y))
+            
+            # Extract the selected row from the window
+            region = arr[win_y:win_y + win_h, win_x:win_x + win_w]
+            if region.size == 0:
+                self._curve_view.clear()
+                return
+            
+            # Clamp selected row to valid range
+            if selected_row < 0:
+                selected_row = 0
+            if selected_row >= region.shape[0]:
+                selected_row = max(0, region.shape[0] - 1)
+            
+            row_data = region[selected_row]
+            
+            # Get HU conversion parameters
+            slope = getattr(pixel_table._dataset, 'RescaleSlope', 1.0) if pixel_table._dataset else 1.0
+            intercept = getattr(pixel_table._dataset, 'RescaleIntercept', 0.0) if pixel_table._dataset else 0.0
+            
+            # Convert to HU
+            hu_values = [float(v) * slope + intercept for v in row_data]
+            
+            # X values (absolute pixel positions)
+            x_values = [win_x + i for i in range(len(row_data))]
+            
+            # Set row in title - use absolute Y position
+            absolute_row = win_y + selected_row
+            self._curve_view.set_row(absolute_row)
+            
+            # Update row range in curve view (0 to window_height - 1)
+            self._curve_view.set_row_range(0, max(0, region.shape[0] - 1))
+            
+            self._curve_view.set_data(x_values, hu_values)
     
     def _on_export_measurements(self):
         """Export measurements to CSV file."""

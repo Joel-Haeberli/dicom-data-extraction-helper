@@ -10,7 +10,7 @@ import numpy as np
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QDoubleSpinBox, QSizePolicy
+    QDoubleSpinBox, QSizePolicy, QSpinBox
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis, QSplineSeries
@@ -24,8 +24,12 @@ class CurveView(QWidget):
     - Line chart showing HU values vs X position
     - Manual axis range controls
     - Automatic axis scaling based on data
+    - Row selection for HU profile
     - Dark mode styling
     """
+    
+    # Signal emitted when the selected row changes
+    row_changed = Signal(int)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -39,6 +43,11 @@ class CurveView(QWidget):
         self._manual_x_max: Optional[float] = None
         self._manual_y_min: Optional[float] = None
         self._manual_y_max: Optional[float] = None
+        self._manual_ranges_set: bool = False  # True if user has manually set any axis range
+        
+        # Row selection
+        self._current_row: int = 0
+        self._row_spin: Optional[QSpinBox] = None
         
         # Chart components
         self._chart: Optional[QChart] = None
@@ -66,7 +75,7 @@ class CurveView(QWidget):
         
         # Create chart view
         self._chart = QChart()
-        self._chart.setTitle("HU Profile (First Row of Window)")
+        self._chart.setTitle("HU Profile (Row: 0)")
         self._chart.legend().hide()
         self._chart.setAnimationOptions(QChart.SeriesAnimations)
         
@@ -103,6 +112,14 @@ class CurveView(QWidget):
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(4)
         
+        # Row selector
+        controls_layout.addWidget(QLabel("Row:"))
+        self._row_spin = QSpinBox()
+        self._row_spin.setRange(0, 10000)
+        self._row_spin.setValue(0)
+        self._row_spin.setToolTip("Select which row of the window to display in the HU profile")
+        controls_layout.addWidget(self._row_spin)
+        
         controls_layout.addWidget(QLabel("X Min:"))
         self._x_min_input = QDoubleSpinBox()
         self._x_min_input.setRange(-100000, 100000)
@@ -131,6 +148,8 @@ class CurveView(QWidget):
     
     def _setup_connections(self):
         """Setup signal connections for axis range inputs."""
+        if self._row_spin:
+            self._row_spin.valueChanged.connect(self._on_row_changed)
         if self._x_min_input:
             self._x_min_input.valueChanged.connect(self._on_axis_range_changed)
         if self._x_max_input:
@@ -140,8 +159,14 @@ class CurveView(QWidget):
         if self._y_max_input:
             self._y_max_input.valueChanged.connect(self._on_axis_range_changed)
     
+    def _on_row_changed(self, value: int):
+        """Handler for row selector changes."""
+        self._current_row = value
+        self.row_changed.emit(value)
+    
     def _on_axis_range_changed(self, value):
         """Handler for axis range input changes."""
+        self._manual_ranges_set = True
         self._manual_x_min = self._x_min_input.value() if self._x_min_input else None
         self._manual_x_max = self._x_max_input.value() if self._x_max_input else None
         self._manual_y_min = self._y_min_input.value() if self._y_min_input else None
@@ -168,19 +193,42 @@ class CurveView(QWidget):
             self._series.setColor(Qt.cyan)
         
         # Style inputs
-        for spin in [self._x_min_input, self._x_max_input, self._y_min_input, self._y_max_input]:
+        for spin in [self._x_min_input, self._x_max_input, self._y_min_input, self._y_max_input, self._row_spin]:
             if spin:
                 spin.setStyleSheet("""
-                    QDoubleSpinBox {
+                    QSpinBox, QDoubleSpinBox {
                         background-color: #2b2b2b;
                         color: #e0e0e0;
                         border: 1px solid #444;
                         padding: 2px;
                     }
+                    QSpinBox::up-button, QSpinBox::down-button,
                     QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
                         background-color: #3c3c3c;
                     }
                 """)
+    
+    def set_row_range(self, min_row: int, max_row: int):
+        """Set the valid range for the row selector.
+        
+        Args:
+            min_row: Minimum row value (typically 0)
+            max_row: Maximum row value (window height - 1)
+        """
+        if self._row_spin:
+            self._row_spin.setRange(min_row, max_row)
+    
+    def set_row(self, row: int):
+        """Set the row number displayed in the chart title.
+        
+        Args:
+            row: The y-coordinate (row) of the data being displayed
+        """
+        self._current_row = row
+        if self._row_spin:
+            self._row_spin.setValue(row)
+        if self._chart:
+            self._chart.setTitle(f"HU Profile (Row: {row})")
     
     def set_data(self, x_values: List[float], y_values: List[float]):
         """
@@ -203,34 +251,26 @@ class CurveView(QWidget):
             for x, y in zip(self._x_values, self._y_values):
                 self._series.append(x, y)
         
-        # Update axes (use automatic mode if manual ranges not set)
-        if (self._manual_x_min is None and self._manual_x_max is None and
-            self._manual_y_min is None and self._manual_y_max is None):
-            # Auto mode: use data min/max
-            x_min = min(self._x_values) if self._x_values else 0
-            x_max = max(self._x_values) if self._x_values else 1
-            y_min = min(self._y_values) if self._y_values else 0
-            y_max = max(self._y_values) if self._y_values else 1
-            
-            # Add some padding
-            x_range = x_max - x_min
-            y_range = y_max - y_min
-            if x_range > 0:
-                x_min -= x_range * 0.05
-                x_max += x_range * 0.05
-            if y_range > 0:
-                y_min -= y_range * 0.05
-                y_max += y_range * 0.05
-            
-            # Update inputs to show current auto ranges
-            if self._x_min_input:
-                self._x_min_input.setValue(x_min)
-            if self._x_max_input:
-                self._x_max_input.setValue(x_max)
-            if self._y_min_input:
-                self._y_min_input.setValue(y_min)
-            if self._y_max_input:
-                self._y_max_input.setValue(y_max)
+        # Always update input fields to show current data ranges (with Y padding)
+        # This allows user to see actual data ranges even in manual mode
+        x_min = min(self._x_values) if self._x_values else 0
+        x_max = max(self._x_values) if self._x_values else 1
+        
+        # Y axis: use min-20 and max+20 for perfect alignment
+        y_min = min(self._y_values) if self._y_values else 0
+        y_max = max(self._y_values) if self._y_values else 1
+        y_min -= 20
+        y_max += 20
+        
+        # Update inputs to show current data ranges
+        if self._x_min_input:
+            self._x_min_input.setValue(x_min)
+        if self._x_max_input:
+            self._x_max_input.setValue(x_max)
+        if self._y_min_input:
+            self._y_min_input.setValue(y_min)
+        if self._y_max_input:
+            self._y_max_input.setValue(y_max)
         
         self._update_axes()
     
@@ -240,35 +280,21 @@ class CurveView(QWidget):
             return
         
         # Determine ranges
-        if self._manual_x_min is not None and self._manual_x_max is not None:
-            x_min = self._manual_x_min
-            x_max = self._manual_x_max
+        if self._manual_ranges_set:
+            # Use manual ranges from inputs
+            x_min = self._manual_x_min if self._manual_x_min is not None else (min(self._x_values) if self._x_values else 0)
+            x_max = self._manual_x_max if self._manual_x_max is not None else (max(self._x_values) if self._x_values else 1)
+            y_min = self._manual_y_min if self._manual_y_min is not None else (min(self._y_values) if self._y_values else 0)
+            y_max = self._manual_y_max if self._manual_y_max is not None else (max(self._y_values) if self._y_values else 1)
         else:
+            # Auto mode: use data min/max
             x_min = min(self._x_values) if self._x_values else 0
             x_max = max(self._x_values) if self._x_values else 1
-            # Add padding in auto mode
-            x_range = x_max - x_min
-            if x_range > 0:
-                x_min -= x_range * 0.05
-                x_max += x_range * 0.05
-            else:
-                x_min -= 0.5
-                x_max += 0.5
-        
-        if self._manual_y_min is not None and self._manual_y_max is not None:
-            y_min = self._manual_y_min
-            y_max = self._manual_y_max
-        else:
             y_min = min(self._y_values) if self._y_values else 0
             y_max = max(self._y_values) if self._y_values else 1
-            # Add padding in auto mode
-            y_range = y_max - y_min
-            if y_range > 0:
-                y_min -= y_range * 0.05
-                y_max += y_range * 0.05
-            else:
-                y_min -= 0.5
-                y_max += 0.5
+            # Apply fixed padding: Y gets ±20, X gets no padding
+            y_min -= 20
+            y_max += 20
         
         # Set axis ranges
         self._axis_x.setRange(x_min, x_max)
@@ -286,41 +312,9 @@ class CurveView(QWidget):
             self._axis_x.setRange(0, 1)
         if self._axis_y:
             self._axis_y.setRange(0, 1)
-    
-    def set_manual_ranges(self, x_min: float, x_max: float, y_min: float, y_max: float):
-        """
-        Set manual axis ranges.
         
-        Args:
-            x_min: Minimum X value
-            x_max: Maximum X value
-            y_min: Minimum Y (HU) value
-            y_max: Maximum Y (HU) value
-        """
-        self._manual_x_min = x_min
-        self._manual_x_max = x_max
-        self._manual_y_min = y_min
-        self._manual_y_max = y_max
-        
-        # Update input fields
-        if self._x_min_input:
-            self._x_min_input.setValue(x_min)
-        if self._x_max_input:
-            self._x_max_input.setValue(x_max)
-        if self._y_min_input:
-            self._y_min_input.setValue(y_min)
-        if self._y_max_input:
-            self._y_max_input.setValue(y_max)
-        
-        self._update_axes()
-    
-    def reset_manual_ranges(self):
-        """Reset manual ranges to automatic mode."""
-        self._manual_x_min = None
-        self._manual_x_max = None
-        self._manual_y_min = None
-        self._manual_y_max = None
-        
-        # Re-update axes with auto ranges
-        if self._x_values and self._y_values:
-            self.set_data(self._x_values, self._y_values)
+        # Reset row in title
+        if self._chart:
+            self._chart.setTitle("HU Profile (Row: 0)")
+        if self._row_spin:
+            self._row_spin.setValue(0)
