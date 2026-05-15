@@ -689,11 +689,8 @@ class MainWindow(QMainWindow):
             
             row_data = zoomed[selected_row]
             
-            # X values are center positions of each chunk
-            factor = pixel_table._zoom_factor
-            win_x = pixel_table._window_x
-            win_y = pixel_table._window_y
-            x_values = [win_x + i * factor + factor / 2.0 for i in range(len(row_data))]
+            # X values are indices relative to window start (0-based)
+            x_values = [i for i in range(len(row_data))]
             
             hu_values = list(row_data)
             
@@ -746,8 +743,8 @@ class MainWindow(QMainWindow):
             # Convert to HU
             hu_values = [float(v) * slope + intercept for v in row_data]
             
-            # X values (absolute pixel positions)
-            x_values = [win_x + i for i in range(len(row_data))]
+            # X values (relative to window start, 0-based)
+            x_values = [i for i in range(len(row_data))]
             
             # Set row in title - use absolute Y position
             absolute_row = win_y + selected_row

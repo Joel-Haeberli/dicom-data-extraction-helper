@@ -719,7 +719,7 @@ class ImageViewerWithMouseTracking(QWidget):
             # Change cursor size
             if event.angleDelta().y() > 0:
                 # Increase cursor size
-                new_size = min(self._cursor_window_size + 1, 50)
+                new_size = self._cursor_window_size + 1
             else:
                 # Decrease cursor size
                 new_size = max(self._cursor_window_size - 1, 1)

@@ -10,10 +10,11 @@ import numpy as np
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QDoubleSpinBox, QSizePolicy, QSpinBox
+    QDoubleSpinBox, QSizePolicy, QSpinBox, QPushButton, QFileDialog
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QDateTime
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis, QSplineSeries
+from PySide6.QtGui import QImage, QPainter
 
 
 class CurveView(QWidget):
@@ -87,7 +88,7 @@ class CurveView(QWidget):
         
         # Create axes
         self._axis_x = QValueAxis()
-        self._axis_x.setTitleText("X Position (pixel)")
+        self._axis_x.setTitleText("X Position (window-relative)")
         self._axis_x.setLabelFormat("%.1f")
         self._axis_x.setTickCount(10)
         
@@ -144,6 +145,11 @@ class CurveView(QWidget):
         self._y_max_input.setDecimals(2)
         controls_layout.addWidget(self._y_max_input)
         
+        # Export button
+        self._export_button = QPushButton("Export PNG")
+        self._export_button.setToolTip("Export the curve as PNG image")
+        controls_layout.addWidget(self._export_button)
+        
         main_layout.addLayout(controls_layout, 0)
     
     def _setup_connections(self):
@@ -158,6 +164,8 @@ class CurveView(QWidget):
             self._y_min_input.valueChanged.connect(self._on_axis_range_changed)
         if self._y_max_input:
             self._y_max_input.valueChanged.connect(self._on_axis_range_changed)
+        if self._export_button:
+            self._export_button.clicked.connect(self._on_export_png)
     
     def _on_row_changed(self, value: int):
         """Handler for row selector changes."""
@@ -324,3 +332,35 @@ class CurveView(QWidget):
         if self._chart:
             self._chart.setTitle("HU Profile (Row: 0)")
         self._current_row = 0
+
+    def _on_export_png(self):
+        """Export the current curve as PNG image."""
+        if not self._chart or not self._chart_view:
+            return
+
+        # Get save file path
+        timestamp = QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss")
+        default_filename = f"curve_{timestamp}.png"
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Curve as PNG",
+            default_filename,
+            "PNG Files (*.png);;All Files (*)"
+        )
+        
+        if not filepath:
+            return
+
+        # Render chart to image
+        image = QImage(self._chart_view.size(), QImage.Format_ARGB32)
+        image.fill(Qt.transparent)
+        
+        painter = QPainter(image)
+        self._chart_view.render(painter)
+        painter.end()
+        
+        # Save image
+        if image.save(filepath, "PNG"):
+            print(f"Curve exported to {filepath}")
+        else:
+            print(f"Failed to export curve to {filepath}")
