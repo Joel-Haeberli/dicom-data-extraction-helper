@@ -264,6 +264,17 @@ class ComparisonWindow(QDialog):
         tab3_layout.addWidget(self._image_label_full)
         self._tab_widget.addTab(tab3, "Image")
 
+        # Tab 4: full-width curve with mm x-axis
+        tab4 = QWidget()
+        tab4_layout = QVBoxLayout(tab4)
+        tab4_layout.setContentsMargins(2, 2, 2, 2)
+        self._chart_mm = self._create_chart()
+        self._chart_view_mm = QChartView(self._chart_mm)
+        self._chart_view_mm.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._chart_view_mm.setRenderHint(QPainter.Antialiasing)
+        tab4_layout.addWidget(self._chart_view_mm)
+        self._tab_widget.addTab(tab4, "Curve (mm)")
+
         main_layout.addWidget(self._tab_widget, 1)
 
         # ── Bottom row: measurement toggles + export ──────────────────
@@ -365,12 +376,18 @@ class ComparisonWindow(QDialog):
             painter = QPainter(pixmap)
             self._chart_view_full.render(painter)
             painter.end()
-        else:
+        elif tab == 2:
             if self._image_label_full.pixmap() and not self._image_label_full.pixmap().isNull():
                 pixmap = self._image_label_full.pixmap().copy()
             else:
                 pixmap = QPixmap(self._image_label_full.size())
                 pixmap.fill(Qt.black)
+        else:  # tab == 3: Curve (mm)
+            pixmap = QPixmap(self._chart_view_mm.size())
+            pixmap.fill(Qt.black)
+            painter = QPainter(pixmap)
+            self._chart_view_mm.render(painter)
+            painter.end()
 
         if pixmap.save(filepath, "PNG"):
             print(f"Comparison exported to {filepath}")
@@ -450,7 +467,7 @@ class ComparisonWindow(QDialog):
         Axis ranges are derived from ALL measurements (enabled or not) so the
         scale stays stable when toggling individual curves.
         """
-        for chart in (self._chart, self._chart_full):
+        for chart in (self._chart, self._chart_full, self._chart_mm):
             chart.removeAllSeries()
             for axis in list(chart.axes()):
                 chart.removeAxis(axis)
@@ -460,8 +477,11 @@ class ComparisonWindow(QDialog):
 
         all_hu_values: List[float] = []
         all_window_widths: List[int] = []
-        # (measurement_index, x_values, hu_values, color) for enabled series only
+        all_mm_widths: List[float] = []
+        # (index, x_px, hu_values, color) for pixel charts
         enabled_series: List[Tuple] = []
+        # (index, x_mm, hu_values, color) for mm chart — only measurements with spacing
+        enabled_series_mm: List[Tuple] = []
 
         for i, m in self._measurements_for_current_image():
             state = self._measurement_states[i]
@@ -470,12 +490,16 @@ class ComparisonWindow(QDialog):
             row = m.get('row', 0) + state['row_offset']
             slope = m.get('slope', 1.0)
             intercept = m.get('intercept', 0.0)
+            pixel_spacing = m.get('pixel_spacing', None)  # (row_mm, col_mm) or None
+            col_mm = float(pixel_spacing[1]) if pixel_spacing is not None else None
 
             window_pixels = m.get('window_pixels', [])
             if not window_pixels:
                 continue
 
             all_window_widths.append(win_w)
+            if col_mm is not None:
+                all_mm_widths.append((win_w - 1) * col_mm)
 
             window_arr = np.array(window_pixels, dtype=np.float32)
             row = max(0, min(row, window_arr.shape[0] - 1))
@@ -485,9 +509,13 @@ class ComparisonWindow(QDialog):
             all_hu_values.extend(hu_values)  # always — keeps axis range stable on toggle
 
             if state['enabled']:
-                enabled_series.append((i, list(range(len(row_data))), hu_values, state['color']))
+                x_px = list(range(len(row_data)))
+                enabled_series.append((i, x_px, hu_values, state['color']))
+                if col_mm is not None:
+                    x_mm = [px * col_mm for px in x_px]
+                    enabled_series_mm.append((i, x_mm, hu_values, state['color']))
 
-        # Compute axis ranges from all measurements regardless of enabled state
+        # Shared y range (same for all charts — stable across toggles)
         if all_hu_values:
             y_min = min(all_hu_values)
             y_max = max(all_hu_values)
@@ -497,24 +525,23 @@ class ComparisonWindow(QDialog):
         else:
             y_min, y_max = 0, 1
 
-        x_max = max(all_window_widths) - 1 if all_window_widths else 1
+        x_max_px = max(all_window_widths) - 1 if all_window_widths else 1
+        x_max_mm = max(all_mm_widths) if all_mm_widths else 1.0
 
-        for chart in (self._chart, self._chart_full):
-            # 1. Add series first (Qt Charts requirement)
+        def _populate_chart(chart, series_list, x_title, x_fmt, x_max):
             chart_series = []
-            for i, x_values, hu_values, color in enabled_series:
+            for idx, x_values, hu_values, color in series_list:
                 series = QSplineSeries()
-                series.setName(f"M{i + 1}")
+                series.setName(f"M{idx + 1}")
                 series.setColor(color)
                 for x, y in zip(x_values, hu_values):
                     series.append(x, y)
                 chart.addSeries(series)
                 chart_series.append(series)
 
-            # 2. Create brand-new axis objects and add them to the chart
             axis_x = QValueAxis()
-            axis_x.setTitleText("X Position (window-relative)")
-            axis_x.setLabelFormat("%d")
+            axis_x.setTitleText(x_title)
+            axis_x.setLabelFormat(x_fmt)
             axis_x.setTickCount(10)
             axis_x.setRange(0, x_max)
             chart.addAxis(axis_x, Qt.AlignBottom)
@@ -526,14 +553,33 @@ class ComparisonWindow(QDialog):
             axis_y.setRange(y_min, y_max)
             chart.addAxis(axis_y, Qt.AlignLeft)
 
-            # 3. Attach axes to each series
             for series in chart_series:
                 series.attachAxis(axis_x)
                 series.attachAxis(axis_y)
 
+        # Build pixel-spacing label for the mm chart title
+        seen_spacing = []
+        for _, m in self._measurements_for_current_image():
+            ps = m.get('pixel_spacing', None)
+            if ps is not None:
+                col_mm_val = float(ps[1])
+                if not any(abs(col_mm_val - s) < 1e-6 for s in seen_spacing):
+                    seen_spacing.append(col_mm_val)
+        if seen_spacing:
+            ps_label = " / ".join(f"{s:.4f} mm/px" for s in seen_spacing)
+            mm_title = f"Combined Measurement Curves  [{ps_label}]"
+        else:
+            mm_title = "Combined Measurement Curves  [pixel spacing unavailable]"
+        self._chart_mm.setTitle(mm_title)
+
+        _populate_chart(self._chart,      enabled_series,    "X Position (px)", "%d",    x_max_px)
+        _populate_chart(self._chart_full, enabled_series,    "X Position (px)", "%d",    x_max_px)
+        _populate_chart(self._chart_mm,   enabled_series_mm, "Distance (mm)",   "%.2f",  x_max_mm)
+
         self._apply_theme()
         self._chart_view.repaint()
         self._chart_view_full.repaint()
+        self._chart_view_mm.repaint()
 
     def _toggle_theme(self):
         """Toggle between light and dark mode."""
@@ -550,7 +596,7 @@ class ComparisonWindow(QDialog):
             self._apply_light_mode()
 
     def _apply_dark_mode(self):
-        for chart in (self._chart, self._chart_full):
+        for chart in (self._chart, self._chart_full, self._chart_mm):
             chart.setBackgroundBrush(Qt.black)
             chart.setPlotAreaBackgroundBrush(Qt.black)
             chart.setPlotAreaBackgroundVisible(True)
@@ -561,7 +607,7 @@ class ComparisonWindow(QDialog):
                 axis.setLinePenColor(Qt.white)
 
     def _apply_light_mode(self):
-        for chart in (self._chart, self._chart_full):
+        for chart in (self._chart, self._chart_full, self._chart_mm):
             chart.setBackgroundBrush(Qt.white)
             chart.setPlotAreaBackgroundBrush(Qt.white)
             chart.setPlotAreaBackgroundVisible(True)
