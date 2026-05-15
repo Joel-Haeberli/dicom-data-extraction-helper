@@ -956,6 +956,9 @@ class PixelArrayTable(QWidget):
         self._slope: float = 1.0
         self._intercept: float = 0.0
         self._has_hu: bool = False
+
+        # Pixel spacing from DICOM tag (0028,0030): (row_mm, col_mm) or None
+        self._pixel_spacing: Optional[tuple] = None
         
         # Image viewer for cursor tracking
         self._image_viewer: Optional[ImageViewerWithMouseTracking] = None
@@ -1107,7 +1110,18 @@ Min: {stats['hu_min']:8.2f}<br>
 Max: {stats['hu_max']:8.2f}"""
             else:
                 stats_text += "<br><br><i>HU: Not available</i>"
-            
+
+            # Pixel spacing (0028,0030)
+            if self._pixel_spacing is not None:
+                row_mm, col_mm = self._pixel_spacing
+                if abs(row_mm - col_mm) < 1e-6:
+                    ps_str = f"{row_mm:.4f} mm/px"
+                else:
+                    ps_str = f"{row_mm:.4f} (row) / {col_mm:.4f} (col) mm/px"
+                stats_text += f"<br><br><b>Pixel Spacing:</b><br>{ps_str}"
+            else:
+                stats_text += "<br><br><i>Pixel Spacing: Not available</i>"
+
             self._last_stats_text = stats_text
         
         # Update external viewer's stats display
@@ -1244,6 +1258,7 @@ Max: {stats['hu_max']:8.2f}"""
                 'hu_min': stats['hu_min'],
                 'hu_max': stats['hu_max'],
                 'note': '',  # Free text field
+                'pixel_spacing': self._pixel_spacing,
                 # Window parameters for curve comparison
                 'win_x': win_x,
                 'win_y': win_y,
@@ -1317,6 +1332,7 @@ Max: {stats['hu_max']:8.2f}"""
             'hu_min': stats['hu_min'],
             'hu_max': stats['hu_max'],
             'note': '',
+            'pixel_spacing': self._pixel_spacing,
             # Window parameters for curve comparison
             'win_x': win_x,
             'win_y': win_y,
@@ -1615,6 +1631,7 @@ Max: {stats['hu_max']:8.2f}"""
             self._slope = 1.0
             self._intercept = 0.0
             self._has_hu = False
+            self._pixel_spacing = None
             self._clear_tables()
             return
         
@@ -1626,6 +1643,13 @@ Max: {stats['hu_max']:8.2f}"""
         self._slope = getattr(ds, 'RescaleSlope', 1.0)
         self._intercept = getattr(ds, 'RescaleIntercept', 0.0)
         self._has_hu = self._slope != 1.0 or self._intercept != 0.0
+
+        # Extract pixel spacing (0028,0030); fall back to ImagerPixelSpacing
+        ps = getattr(ds, 'PixelSpacing', None) or getattr(ds, 'ImagerPixelSpacing', None)
+        if ps is not None and len(ps) >= 2:
+            self._pixel_spacing = (float(ps[0]), float(ps[1]))
+        else:
+            self._pixel_spacing = None
         
         # Try to get pixel array
         try:

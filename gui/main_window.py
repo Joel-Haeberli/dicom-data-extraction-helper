@@ -167,12 +167,12 @@ class MainWindow(QMainWindow):
         
         # Measurements table (below metadata)
         self._measurements_table = QTableWidget(self)
-        self._measurements_table.setColumnCount(18)
+        self._measurements_table.setColumnCount(19)
         self._measurements_table.setHorizontalHeaderLabels([
-            "#", "Study", "Image Name", "Z", "X", "Y", "Size", "Form", 
+            "#", "Study", "Image Name", "Z", "X", "Y", "Size", "Form",
             "Raw Mean", "Raw Std", "Raw Min", "Raw Max",
             "HU Mean", "HU Std", "HU Min", "HU Max",
-            "Note", "Delete"
+            "mm/px", "Note", "Delete"
         ])
         self._measurements_table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked | QTableWidget.EditTrigger.EditKeyPressed)
         self._measurements_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -201,24 +201,25 @@ class MainWindow(QMainWindow):
         """)
         
         # Set column widths - Note column wider, others reasonable
-        self._measurements_table.setColumnWidth(0, 40)  # #
+        self._measurements_table.setColumnWidth(0, 40)   # #
         self._measurements_table.setColumnWidth(1, 120)  # Study
         self._measurements_table.setColumnWidth(2, 150)  # Image Name
-        self._measurements_table.setColumnWidth(3, 40)  # Z
-        self._measurements_table.setColumnWidth(4, 40)  # X
-        self._measurements_table.setColumnWidth(5, 40)  # Y
-        self._measurements_table.setColumnWidth(6, 60)  # Size
-        self._measurements_table.setColumnWidth(7, 80)  # Form
-        self._measurements_table.setColumnWidth(8, 80)  # Raw Mean
-        self._measurements_table.setColumnWidth(9, 80)  # Raw Std
+        self._measurements_table.setColumnWidth(3, 40)   # Z
+        self._measurements_table.setColumnWidth(4, 40)   # X
+        self._measurements_table.setColumnWidth(5, 40)   # Y
+        self._measurements_table.setColumnWidth(6, 60)   # Size
+        self._measurements_table.setColumnWidth(7, 80)   # Form
+        self._measurements_table.setColumnWidth(8, 80)   # Raw Mean
+        self._measurements_table.setColumnWidth(9, 80)   # Raw Std
         self._measurements_table.setColumnWidth(10, 80)  # Raw Min
         self._measurements_table.setColumnWidth(11, 80)  # Raw Max
         self._measurements_table.setColumnWidth(12, 80)  # HU Mean
         self._measurements_table.setColumnWidth(13, 80)  # HU Std
         self._measurements_table.setColumnWidth(14, 80)  # HU Min
         self._measurements_table.setColumnWidth(15, 80)  # HU Max
-        self._measurements_table.setColumnWidth(16, 300)  # Note - wider
-        self._measurements_table.setColumnWidth(17, 60)  # Delete
+        self._measurements_table.setColumnWidth(16, 90)  # mm/px
+        self._measurements_table.setColumnWidth(17, 300) # Note - wider
+        self._measurements_table.setColumnWidth(18, 60)  # Delete
         
         # Export button for measurements
         self._export_measurements_button = QPushButton("Export Measurements (CSV)", self)
@@ -564,8 +565,8 @@ class MainWindow(QMainWindow):
             row: Row index of the changed cell
             column: Column index of the changed cell
         """
-        # Only handle changes in the Note column (column 16)
-        if column == 16 and 0 <= row < len(self._measurements):
+        # Only handle changes in the Note column (column 17)
+        if column == 17 and 0 <= row < len(self._measurements):
             item = self._measurements_table.item(row, column)
             if item is not None:
                 # Update the note in the measurement dictionary
@@ -582,7 +583,7 @@ class MainWindow(QMainWindow):
         """
         if 0 <= row < len(self._measurements):
             # Handle Delete column
-            if column == 17:
+            if column == 18:
                 # Remove the measurement from the list
                 self._measurements.pop(row)
                 # Update the table
@@ -815,6 +816,12 @@ class MainWindow(QMainWindow):
                     study_desc = m.get('study_description', '')
                     study_uid = m.get('study_uid', '')
                     study_text = study_desc if study_desc else study_uid[:8] if study_uid else 'Unknown'
+                    ps = m.get('pixel_spacing', None)
+                    if ps is not None:
+                        row_mm, col_mm = ps
+                        ps_csv = f"{row_mm:.6f}" if abs(row_mm - col_mm) < 1e-6 else f"{row_mm:.6f}/{col_mm:.6f}"
+                    else:
+                        ps_csv = ""
                     row = [
                         str(i + 1),                                           # #
                         study_text,                                           # Study
@@ -832,6 +839,7 @@ class MainWindow(QMainWindow):
                         f"{m.get('hu_std', 0):.2f}",                        # HU Std
                         f"{m.get('hu_min', 0):.2f}",                        # HU Min
                         f"{m.get('hu_max', 0):.2f}",                        # HU Max
+                        ps_csv,                                              # mm/px
                         str(m.get('note', '')),                              # Note
                         "",                                                   # Delete (empty in CSV)
                     ]
@@ -1089,16 +1097,31 @@ class MainWindow(QMainWindow):
                 # Column 15: HU Max
                 self._measurements_table.setItem(i, 15, QTableWidgetItem(f"{m.get('hu_max', 0):.2f}"))
 
-                # Column 16: Note (editable)
+                # Column 16: Pixel spacing (mm/px)
+                ps = m.get('pixel_spacing', None)
+                if ps is not None:
+                    row_mm, col_mm = ps
+                    if abs(row_mm - col_mm) < 1e-6:
+                        ps_text = f"{row_mm:.4f}"
+                    else:
+                        ps_text = f"{row_mm:.4f}/{col_mm:.4f}"
+                else:
+                    ps_text = "N/A"
+                ps_item = QTableWidgetItem(ps_text)
+                if ps is not None:
+                    ps_item.setToolTip(f"Row: {ps[0]:.6f} mm/px  Col: {ps[1]:.6f} mm/px")
+                self._measurements_table.setItem(i, 16, ps_item)
+
+                # Column 17: Note (editable)
                 note_item = QTableWidgetItem(m.get('note', ''))
                 note_item.setFlags(note_item.flags() | Qt.ItemFlag.ItemIsEditable)
-                self._measurements_table.setItem(i, 16, note_item)
+                self._measurements_table.setItem(i, 17, note_item)
 
-                # Column 17: Delete button
+                # Column 18: Delete button
                 delete_item = QTableWidgetItem("Delete")
                 delete_item.setForeground(QColor(200, 0, 0))
                 delete_item.setToolTip("Click to delete this measurement")
-                self._measurements_table.setItem(i, 17, delete_item)
+                self._measurements_table.setItem(i, 18, delete_item)
         finally:
             self._measurements_table.blockSignals(False)
     
