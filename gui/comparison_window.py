@@ -155,6 +155,9 @@ class ComparisonWindow(QDialog):
 
         self.setWindowTitle("Compare Measurement Curves")
         self.setMinimumSize(800, 600)
+        
+        # Theme mode (default: dark)
+        self._dark_mode: bool = True
 
         self._setup_ui()
         self._setup_connections()
@@ -296,6 +299,14 @@ class ComparisonWindow(QDialog):
         self._export_button.setToolTip("Export the active tab as PNG")
         self._export_button.clicked.connect(self._on_export_png)
         toggles_layout.addWidget(self._export_button)
+        
+        # Theme toggle button
+        self._theme_button = QPushButton("🌓")
+        self._theme_button.setToolTip("Toggle Light/Dark mode")
+        self._theme_button.setFixedWidth(32)
+        self._theme_button.clicked.connect(self._toggle_theme)
+        toggles_layout.addWidget(self._theme_button)
+        
         toggles_layout.addStretch()
 
         main_layout.addLayout(toggles_layout, 0)
@@ -507,9 +518,23 @@ class ComparisonWindow(QDialog):
             axis_x.setRange(0, x_max)
             axis_y.setRange(y_min, y_max)
 
-        self._apply_dark_mode()
+        self._apply_theme()
         self._chart_view.repaint()
         self._chart_view_full.repaint()
+
+    def _toggle_theme(self):
+        """Toggle between light and dark mode."""
+        self._dark_mode = not self._dark_mode
+        self._apply_theme()
+        # Update button icon
+        self._theme_button.setText("🌓" if self._dark_mode else "☀️")
+
+    def _apply_theme(self):
+        """Apply the current theme (light or dark) to the charts."""
+        if self._dark_mode:
+            self._apply_dark_mode()
+        else:
+            self._apply_light_mode()
 
     def _apply_dark_mode(self):
         for chart in (self._chart, self._chart_full):
@@ -521,3 +546,14 @@ class ComparisonWindow(QDialog):
                 axis.setTitleBrush(Qt.white)
                 axis.setGridLineColor(Qt.darkGray)
                 axis.setLinePenColor(Qt.white)
+
+    def _apply_light_mode(self):
+        for chart in (self._chart, self._chart_full):
+            chart.setBackgroundBrush(Qt.white)
+            chart.setPlotAreaBackgroundBrush(Qt.white)
+            chart.setPlotAreaBackgroundVisible(True)
+            for axis in chart.axes():
+                axis.setLabelsColor(Qt.black)
+                axis.setTitleBrush(Qt.black)
+                axis.setGridLineColor(Qt.lightGray)
+                axis.setLinePenColor(Qt.black)
