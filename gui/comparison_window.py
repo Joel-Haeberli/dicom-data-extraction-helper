@@ -56,7 +56,7 @@ class MeasurementToggle(QWidget):
         layout.addWidget(self._color_button)
 
     def _on_toggled(self, state: int):
-        self.toggled.emit(self._index, state == Qt.Checked)
+        self.toggled.emit(self._index, bool(state))
 
     def _on_row_changed(self, value: int):
         self._row = value
@@ -176,25 +176,12 @@ class ComparisonWindow(QDialog):
         ]
 
     @staticmethod
-    def _create_chart() -> Tuple[QChart, QValueAxis, QValueAxis]:
+    def _create_chart() -> QChart:
         chart = QChart()
         chart.setTitle("Combined Measurement Curves")
         chart.legend().hide()
         chart.setAnimationOptions(QChart.SeriesAnimations)
-
-        axis_x = QValueAxis()
-        axis_x.setTitleText("X Position (window-relative)")
-        axis_x.setLabelFormat("%d")
-        axis_x.setTickCount(10)
-        chart.addAxis(axis_x, Qt.AlignBottom)
-
-        axis_y = QValueAxis()
-        axis_y.setTitleText("HU Value")
-        axis_y.setLabelFormat("%.1f")
-        axis_y.setTickCount(10)
-        chart.addAxis(axis_y, Qt.AlignLeft)
-
-        return chart, axis_x, axis_y
+        return chart
 
     # ── UI construction ───────────────────────────────────────────────
 
@@ -246,7 +233,7 @@ class ComparisonWindow(QDialog):
         self._chart_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         chart_layout = QVBoxLayout(self._chart_frame)
         chart_layout.setContentsMargins(2, 2, 2, 2)
-        self._chart, self._axis_x, self._axis_y = self._create_chart()
+        self._chart = self._create_chart()
         self._chart_view = QChartView(self._chart)
         self._chart_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._chart_view.setRenderHint(QPainter.Antialiasing)
@@ -260,7 +247,7 @@ class ComparisonWindow(QDialog):
         tab2 = QWidget()
         tab2_layout = QVBoxLayout(tab2)
         tab2_layout.setContentsMargins(2, 2, 2, 2)
-        self._chart_full, self._axis_x_full, self._axis_y_full = self._create_chart()
+        self._chart_full = self._create_chart()
         self._chart_view_full = QChartView(self._chart_full)
         self._chart_view_full.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._chart_view_full.setRenderHint(QPainter.Antialiasing)
@@ -451,55 +438,56 @@ class ComparisonWindow(QDialog):
         self._image_label_full.setPixmap(pixmap)
 
     def _update_curve_display(self):
-        """Rebuild series in both charts from measurements of the selected image."""
+        """Full rebuild of all series and axes for the selected image.
+
+        Creates brand-new QValueAxis objects every call to avoid the PySide6
+        ownership bug where removeAxis makes stored axis objects stale so that
+        subsequent addAxis/attachAxis calls silently fail.
+
+        Series are added before axes (required by Qt Charts), then axes are
+        attached to series afterward.
+
+        Axis ranges are derived from ALL measurements (enabled or not) so the
+        scale stays stable when toggling individual curves.
+        """
         for chart in (self._chart, self._chart_full):
-            for series in list(chart.series()):
-                chart.removeSeries(series)
+            chart.removeAllSeries()
+            for axis in list(chart.axes()):
+                chart.removeAxis(axis)
 
         if not self._measurements:
             return
 
         all_hu_values: List[float] = []
         all_window_widths: List[int] = []
+        # (measurement_index, x_values, hu_values, color) for enabled series only
+        enabled_series: List[Tuple] = []
 
         for i, m in self._measurements_for_current_image():
             state = self._measurement_states[i]
-            if not state['enabled']:
-                continue
 
             win_w = m.get('win_w', m.get('cursor_size', 7))
             row = m.get('row', 0) + state['row_offset']
             slope = m.get('slope', 1.0)
             intercept = m.get('intercept', 0.0)
 
-            all_window_widths.append(win_w)
-
             window_pixels = m.get('window_pixels', [])
             if not window_pixels:
                 continue
 
+            all_window_widths.append(win_w)
+
             window_arr = np.array(window_pixels, dtype=np.float32)
             row = max(0, min(row, window_arr.shape[0] - 1))
-            row_data = window_arr[row][:win_w]  # exactly win_w points
+            row_data = window_arr[row][:win_w]
 
             hu_values = [float(v) * slope + intercept for v in row_data]
-            all_hu_values.extend(hu_values)
-            x_values = list(range(len(row_data)))
+            all_hu_values.extend(hu_values)  # always — keeps axis range stable on toggle
 
-            for chart, axis_x, axis_y in (
-                (self._chart, self._axis_x, self._axis_y),
-                (self._chart_full, self._axis_x_full, self._axis_y_full),
-            ):
-                series = QSplineSeries()
-                series.setName(f"M{i + 1}")
-                series.setColor(state['color'])
-                for x, y in zip(x_values, hu_values):
-                    series.append(x, y)
-                chart.addSeries(series)
-                series.attachAxis(axis_x)
-                series.attachAxis(axis_y)
-                series.setVisible(True)
+            if state['enabled']:
+                enabled_series.append((i, list(range(len(row_data))), hu_values, state['color']))
 
+        # Compute axis ranges from all measurements regardless of enabled state
         if all_hu_values:
             y_min = min(all_hu_values)
             y_max = max(all_hu_values)
@@ -511,12 +499,37 @@ class ComparisonWindow(QDialog):
 
         x_max = max(all_window_widths) - 1 if all_window_widths else 1
 
-        for axis_x, axis_y in (
-            (self._axis_x, self._axis_y),
-            (self._axis_x_full, self._axis_y_full),
-        ):
+        for chart in (self._chart, self._chart_full):
+            # 1. Add series first (Qt Charts requirement)
+            chart_series = []
+            for i, x_values, hu_values, color in enabled_series:
+                series = QSplineSeries()
+                series.setName(f"M{i + 1}")
+                series.setColor(color)
+                for x, y in zip(x_values, hu_values):
+                    series.append(x, y)
+                chart.addSeries(series)
+                chart_series.append(series)
+
+            # 2. Create brand-new axis objects and add them to the chart
+            axis_x = QValueAxis()
+            axis_x.setTitleText("X Position (window-relative)")
+            axis_x.setLabelFormat("%d")
+            axis_x.setTickCount(10)
             axis_x.setRange(0, x_max)
+            chart.addAxis(axis_x, Qt.AlignBottom)
+
+            axis_y = QValueAxis()
+            axis_y.setTitleText("HU Value")
+            axis_y.setLabelFormat("%.1f")
+            axis_y.setTickCount(10)
             axis_y.setRange(y_min, y_max)
+            chart.addAxis(axis_y, Qt.AlignLeft)
+
+            # 3. Attach axes to each series
+            for series in chart_series:
+                series.attachAxis(axis_x)
+                series.attachAxis(axis_y)
 
         self._apply_theme()
         self._chart_view.repaint()
