@@ -104,7 +104,7 @@ class ImageViewer(QWidget):
     def set_overlay(self, overlay: Optional[QImage]):
         """
         Set the overlay image.
-        
+
         Args:
             overlay: QImage overlay, or None to remove
         """
@@ -114,9 +114,8 @@ class ImageViewer(QWidget):
             self._overlay_checkbox.setChecked(False)
             self._show_overlay = False
         else:
-            # When overlay is set, show it by default
-            self._overlay_checkbox.setChecked(True)
-            self._show_overlay = True
+            # Restore user's last preference; default to shown on first overlay
+            self._overlay_checkbox.setChecked(self._show_overlay)
         self._update_display()
     
     def toggle_overlay(self, show: bool):

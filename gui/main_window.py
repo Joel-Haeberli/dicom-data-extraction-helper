@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QSizePolicy
 
 from gui.image_tabs import ImageTabs
 from gui.curve_view import CurveView
+from gui.comparison_window import ComparisonWindow
 from gui.utils.dicom_loader import DICOMLoader, DICOMFile
 from gui.utils.image_utils import (
     dicom_to_qimage,
@@ -288,6 +289,14 @@ class MainWindow(QMainWindow):
         export_layout.addWidget(self._export_measurements_button, 0)
         export_layout.addWidget(self._export_current_window_button, 0)
         export_layout.addWidget(self._export_region_series_button, 0)
+        
+        # Compare Measurement Curves button
+        self._compare_curves_button = QPushButton("Compare Measurement Curves", self)
+        self._compare_curves_button.setToolTip("Open comparison window to view multiple measurement curves")
+        self._compare_curves_button.clicked.connect(self._on_compare_curves)
+        self._compare_curves_button.setEnabled(False)
+        export_layout.addWidget(self._compare_curves_button, 0)
+        
         export_layout.addStretch(1)
         
         measurements_layout.addLayout(export_layout, 0)
@@ -357,9 +366,10 @@ class MainWindow(QMainWindow):
             self._update_navigation_ui()
             self._update_current_selection(self._image_files[0].filepath.name)
             
-            # Enable series region export if we have measurements
+            # Enable series region export and compare curves if we have measurements
             if self._measurements:
                 self._export_region_series_button.setEnabled(True)
+                self._compare_curves_button.setEnabled(True)
             
         except Exception as e:
             QMessageBox.critical(
@@ -529,6 +539,9 @@ class MainWindow(QMainWindow):
             measurement['series_uid'] = self._current_series_uid if self._current_series_uid else 'Unknown'
             measurement['study_description'] = ''
         
+        # Add row for curve comparison (use current curve row)
+        measurement['row'] = self._current_curve_row if hasattr(self, '_current_curve_row') else 0
+        
         # Add to measurements list
         self._measurements.append(measurement)
         
@@ -538,6 +551,7 @@ class MainWindow(QMainWindow):
         # Enable export buttons if we have measurements
         if self._measurements:
             self._export_region_series_button.setEnabled(True)
+            self._compare_curves_button.setEnabled(True)
         # Current window export is enabled when we have pixel data
         if hasattr(self._image_tabs.pixel_array_table, '_pixel_array') and self._image_tabs.pixel_array_table._pixel_array is not None:
             self._export_current_window_button.setEnabled(True)
@@ -576,6 +590,7 @@ class MainWindow(QMainWindow):
                 # Update export button states
                 if not self._measurements:
                     self._export_region_series_button.setEnabled(False)
+                    self._compare_curves_button.setEnabled(False)
             else:
                 # For any other column: reset measurement window to this measurement
                 measurement = self._measurements[row]
@@ -632,7 +647,14 @@ class MainWindow(QMainWindow):
         pixel_table._window_y = win_y
         pixel_table._window_width = win_w
         pixel_table._window_height = win_h
-        
+
+        # Keep cursor_window_size in sync so next cursor movement doesn't revert the window
+        pixel_table._cursor_window_size = actual_cursor_size
+        if pixel_table._cursor_size_spin is not None:
+            pixel_table._cursor_size_spin.blockSignals(True)
+            pixel_table._cursor_size_spin.setValue(actual_cursor_size)
+            pixel_table._cursor_size_spin.blockSignals(False)
+
         # Update spin boxes
         pixel_table._win_x_spin.setValue(win_x)
         pixel_table._win_y_spin.setValue(win_y)
@@ -680,22 +702,22 @@ class MainWindow(QMainWindow):
         # Use zoomed table if available and zoom > 1
         if pixel_table._zoom_factor > 1 and pixel_table._zoomed_table is not None:
             zoomed = pixel_table._zoomed_table
-            
+
             # Clamp selected row to valid range
             if selected_row < 0:
                 selected_row = 0
             if selected_row >= len(zoomed):
                 selected_row = max(0, len(zoomed) - 1)
-            
+
             row_data = zoomed[selected_row]
-            
+
             # X values are indices relative to window start (0-based)
             x_values = [i for i in range(len(row_data))]
-            
+
             hu_values = list(row_data)
-            
+
             # Set row in title - use absolute Y position (window start + selected row)
-            absolute_row = win_y + selected_row * factor
+            absolute_row = pixel_table._window_y + selected_row * pixel_table._zoom_factor
             self._curve_view.set_row_range(0, len(zoomed) - 1)
             self._curve_view.set_row(selected_row, absolute_row)
             
@@ -790,30 +812,50 @@ class MainWindow(QMainWindow):
                 
                 # Write data rows
                 for i, m in enumerate(self._measurements):
+                    study_desc = m.get('study_description', '')
+                    study_uid = m.get('study_uid', '')
+                    study_text = study_desc if study_desc else study_uid[:8] if study_uid else 'Unknown'
                     row = [
-                        str(i + 1),  # Index
-                        str(m.get('image_name', '')),  # Image Name
-                        f"{m.get('z', 0.0):.2f}",  # Z physical coordinate
-                        str(m.get('x', '')),
-                        str(m.get('y', '')),
-                        str(m.get('cursor_size', '')),
-                        "Circle" if m.get('is_circle', False) else "Rectangle",
-                        f"{m.get('raw_mean', 0):.2f}",
-                        f"{m.get('raw_std', 0):.2f}",
-                        f"{m.get('raw_min', 0):.2f}",
-                        f"{m.get('raw_max', 0):.2f}",
-                        f"{m.get('hu_mean', 0):.2f}",
-                        f"{m.get('hu_std', 0):.2f}",
-                        f"{m.get('hu_min', 0):.2f}",
-                        f"{m.get('hu_max', 0):.2f}",
-                        str(m.get('note', '')),  # csv.writer will handle quoting
-                        ""  # Delete column is empty in CSV
+                        str(i + 1),                                           # #
+                        study_text,                                           # Study
+                        str(m.get('image_name', '')),                        # Image Name
+                        f"{m.get('z', 0.0):.2f}",                           # Z
+                        str(m.get('x', '')),                                 # X
+                        str(m.get('y', '')),                                 # Y
+                        str(m.get('cursor_size', '')),                       # Size
+                        "Circle" if m.get('is_circle', False) else "Rectangle",  # Form
+                        f"{m.get('raw_mean', 0):.2f}",                      # Raw Mean
+                        f"{m.get('raw_std', 0):.2f}",                       # Raw Std
+                        f"{m.get('raw_min', 0):.2f}",                       # Raw Min
+                        f"{m.get('raw_max', 0):.2f}",                       # Raw Max
+                        f"{m.get('hu_mean', 0):.2f}",                       # HU Mean
+                        f"{m.get('hu_std', 0):.2f}",                        # HU Std
+                        f"{m.get('hu_min', 0):.2f}",                        # HU Min
+                        f"{m.get('hu_max', 0):.2f}",                        # HU Max
+                        str(m.get('note', '')),                              # Note
+                        "",                                                   # Delete (empty in CSV)
                     ]
                     writer.writerow(row)
             
             QMessageBox.information(self, "Export Successful", f"Measurements exported to:\n{file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", f"Failed to export measurements:\n{str(e)}")
+    
+    def _on_compare_curves(self):
+        """Open the comparison window for measurement curves."""
+        if not self._measurements:
+            QMessageBox.information(self, "No Measurements", "No measurements to compare.")
+            return
+        
+        # Get the current DICOM dataset for image display
+        dataset = None
+        if self._current_dicom_file is not None:
+            dataset = self._current_dicom_file.dataset
+        
+        # Open comparison window
+        self._comparison_window = ComparisonWindow(
+            self._measurements, dataset, self._image_files, self)
+        self._comparison_window.show()
     
     def _on_export_region_series(self):
         """Export region statistics across all images in the series."""
@@ -986,77 +1028,79 @@ class MainWindow(QMainWindow):
     
     def _update_measurements_table(self):
         """Update the measurements table with current measurements."""
-        # Clear existing rows
-        self._measurements_table.setRowCount(0)
-        
-        # Add rows for each measurement
-        for i, m in enumerate(self._measurements):
-            self._measurements_table.insertRow(i)
-            
-            # Column 0: Index
-            self._measurements_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            
-            # Column 1: Study (shortened display)
-            study_desc = m.get('study_description', '')
-            study_uid = m.get('study_uid', '')
-            study_text = study_desc if study_desc else study_uid[:8] if study_uid else 'Unknown'
-            self._measurements_table.setItem(i, 1, QTableWidgetItem(str(study_text)))
-            self._measurements_table.item(i, 1).setToolTip(f"Study: {study_uid}\nSeries: {m.get('series_uid', '')}")
-            
-            # Column 2: Image Name
-            self._measurements_table.setItem(i, 2, QTableWidgetItem(str(m.get('image_name', ''))))
-            
-            # Column 3: Z (physical coordinate)
-            z_val = m.get('z', 0.0)
-            self._measurements_table.setItem(i, 3, QTableWidgetItem(f"{z_val:.2f}"))
-            
-            # Column 4: X position
-            self._measurements_table.setItem(i, 4, QTableWidgetItem(str(m.get('x', 0))))
-            
-            # Column 5: Y position
-            self._measurements_table.setItem(i, 5, QTableWidgetItem(str(m.get('y', 0))))
-            
-            # Column 6: Cursor Size
-            self._measurements_table.setItem(i, 6, QTableWidgetItem(str(m.get('cursor_size', 0))))
-            
-            # Column 7: Form (Circle/Rectangle)
-            form = "Circle" if m.get('is_circle', False) else "Rectangle"
-            self._measurements_table.setItem(i, 7, QTableWidgetItem(form))
-            
-            # Column 8: Raw Mean
-            self._measurements_table.setItem(i, 8, QTableWidgetItem(f"{m.get('raw_mean', 0):.2f}"))
-            
-            # Column 9: Raw Std
-            self._measurements_table.setItem(i, 9, QTableWidgetItem(f"{m.get('raw_std', 0):.2f}"))
-            
-            # Column 10: Raw Min
-            self._measurements_table.setItem(i, 10, QTableWidgetItem(f"{m.get('raw_min', 0):.2f}"))
-            
-            # Column 11: Raw Max
-            self._measurements_table.setItem(i, 11, QTableWidgetItem(f"{m.get('raw_max', 0):.2f}"))
-            
-            # Column 12: HU Mean
-            self._measurements_table.setItem(i, 12, QTableWidgetItem(f"{m.get('hu_mean', 0):.2f}"))
-            
-            # Column 13: HU Std
-            self._measurements_table.setItem(i, 13, QTableWidgetItem(f"{m.get('hu_std', 0):.2f}"))
-            
-            # Column 14: HU Min
-            self._measurements_table.setItem(i, 14, QTableWidgetItem(f"{m.get('hu_min', 0):.2f}"))
-            
-            # Column 15: HU Max
-            self._measurements_table.setItem(i, 15, QTableWidgetItem(f"{m.get('hu_max', 0):.2f}"))
-            
-            # Column 16: Note (editable)
-            note_item = QTableWidgetItem(m.get('note', ''))
-            note_item.setFlags(note_item.flags() | Qt.ItemFlag.ItemIsEditable)
-            self._measurements_table.setItem(i, 16, note_item)
-            
-            # Column 17: Delete button
-            delete_item = QTableWidgetItem("Delete")
-            delete_item.setForeground(QColor(200, 0, 0))
-            delete_item.setToolTip("Click to delete this measurement")
-            self._measurements_table.setItem(i, 17, delete_item)
+        self._measurements_table.blockSignals(True)
+        try:
+            self._measurements_table.setRowCount(0)
+
+            for i, m in enumerate(self._measurements):
+                self._measurements_table.insertRow(i)
+
+                # Column 0: Index
+                self._measurements_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+
+                # Column 1: Study (shortened display)
+                study_desc = m.get('study_description', '')
+                study_uid = m.get('study_uid', '')
+                study_text = study_desc if study_desc else study_uid[:8] if study_uid else 'Unknown'
+                self._measurements_table.setItem(i, 1, QTableWidgetItem(str(study_text)))
+                self._measurements_table.item(i, 1).setToolTip(f"Study: {study_uid}\nSeries: {m.get('series_uid', '')}")
+
+                # Column 2: Image Name
+                self._measurements_table.setItem(i, 2, QTableWidgetItem(str(m.get('image_name', ''))))
+
+                # Column 3: Z (physical coordinate)
+                z_val = m.get('z', 0.0)
+                self._measurements_table.setItem(i, 3, QTableWidgetItem(f"{z_val:.2f}"))
+
+                # Column 4: X position
+                self._measurements_table.setItem(i, 4, QTableWidgetItem(str(m.get('x', 0))))
+
+                # Column 5: Y position
+                self._measurements_table.setItem(i, 5, QTableWidgetItem(str(m.get('y', 0))))
+
+                # Column 6: Cursor Size
+                self._measurements_table.setItem(i, 6, QTableWidgetItem(str(m.get('cursor_size', 0))))
+
+                # Column 7: Form (Circle/Rectangle)
+                form = "Circle" if m.get('is_circle', False) else "Rectangle"
+                self._measurements_table.setItem(i, 7, QTableWidgetItem(form))
+
+                # Column 8: Raw Mean
+                self._measurements_table.setItem(i, 8, QTableWidgetItem(f"{m.get('raw_mean', 0):.2f}"))
+
+                # Column 9: Raw Std
+                self._measurements_table.setItem(i, 9, QTableWidgetItem(f"{m.get('raw_std', 0):.2f}"))
+
+                # Column 10: Raw Min
+                self._measurements_table.setItem(i, 10, QTableWidgetItem(f"{m.get('raw_min', 0):.2f}"))
+
+                # Column 11: Raw Max
+                self._measurements_table.setItem(i, 11, QTableWidgetItem(f"{m.get('raw_max', 0):.2f}"))
+
+                # Column 12: HU Mean
+                self._measurements_table.setItem(i, 12, QTableWidgetItem(f"{m.get('hu_mean', 0):.2f}"))
+
+                # Column 13: HU Std
+                self._measurements_table.setItem(i, 13, QTableWidgetItem(f"{m.get('hu_std', 0):.2f}"))
+
+                # Column 14: HU Min
+                self._measurements_table.setItem(i, 14, QTableWidgetItem(f"{m.get('hu_min', 0):.2f}"))
+
+                # Column 15: HU Max
+                self._measurements_table.setItem(i, 15, QTableWidgetItem(f"{m.get('hu_max', 0):.2f}"))
+
+                # Column 16: Note (editable)
+                note_item = QTableWidgetItem(m.get('note', ''))
+                note_item.setFlags(note_item.flags() | Qt.ItemFlag.ItemIsEditable)
+                self._measurements_table.setItem(i, 16, note_item)
+
+                # Column 17: Delete button
+                delete_item = QTableWidgetItem("Delete")
+                delete_item.setForeground(QColor(200, 0, 0))
+                delete_item.setToolTip("Click to delete this measurement")
+                self._measurements_table.setItem(i, 17, delete_item)
+        finally:
+            self._measurements_table.blockSignals(False)
     
 
     
@@ -1080,11 +1124,12 @@ class MainWindow(QMainWindow):
         self._overlay_color = color
         # Update external viewer's color button style
         if (hasattr(self, '_image_tabs') and self._image_tabs is not None and
-            hasattr(self._image_tabs, '_pixel_array_table') and
-            self._image_tabs._pixel_array_table is not None and
-            hasattr(self._image_tabs._pixel_array_table, '_image_viewer')):
-            viewer = self._image_tabs._pixel_array_table._image_viewer
-            viewer.set_overlay_color(color)
+            hasattr(self._image_tabs, 'pixel_array_table') and
+            self._image_tabs.pixel_array_table is not None and
+            hasattr(self._image_tabs.pixel_array_table, '_image_viewer')):
+            viewer = self._image_tabs.pixel_array_table._image_viewer
+            if viewer is not None and hasattr(viewer, 'set_overlay_color'):
+                viewer.set_overlay_color(color)
         # Re-render the current image with new color
         if self._current_dicom_file:
             self._display_dicom_file(self._current_dicom_file)

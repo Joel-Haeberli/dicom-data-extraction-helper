@@ -944,6 +944,7 @@ class PixelArrayTable(QWidget):
         # Cursor window size (configurable, default 7x7)
         self._cursor_window_size: int = 7
         self._cursor_size_spin: Optional[QSpinBox] = None
+        self._updating_cursor_size: bool = False  # Flag to prevent reentrant updates
         
         # HU stats last calculated values (passed to external viewer)
         self._last_stats_text: str = "No data loaded"
@@ -993,10 +994,8 @@ class PixelArrayTable(QWidget):
         center_x = x
         center_y = y
         
-        # Calculate cursor window size (must be odd for proper centering)
+        # Calculate cursor window size (use as-is, don't force odd)
         cursor_size = max(1, self._cursor_window_size)
-        if cursor_size % 2 == 0:
-            cursor_size += 1  # Ensure odd number for center pixel
         half_size = cursor_size // 2
         
         # Calculate top-left of window
@@ -1193,15 +1192,24 @@ Max: {stats['hu_max']:8.2f}"""
             # Get physical Z from current dataset
             z_physical = float(getattr(self._dataset, 'ImagePositionPatient', [0, 0, 0])[2])
             
-            # Use the EXACT same window as the stats box - no recalculation from cursor position
-            # The table's _window_x/y/width/height are the single source of truth
+            # Calculate window from cursor position and cursor_size
             arr = self._pixel_array[0] if self._pixel_array.ndim == 3 else self._pixel_array
+            rows = arr.shape[0]
+            cols = arr.shape[1]
             
-            # Get current window from table (same as stats box)
-            win_x = self._window_x
-            win_y = self._window_y
-            win_w = self._window_width
-            win_h = self._window_height
+            # Use cursor_size as-is (don't force odd)
+            actual_cursor_size = max(1, cursor_size)
+            half_size = actual_cursor_size // 2
+            
+            # Calculate top-left of window from cursor position
+            win_x = x - half_size
+            win_y = y - half_size
+            
+            # Clamp to valid range (ensure window stays within image bounds)
+            win_x = max(0, min(win_x, cols - actual_cursor_size)) if cols >= actual_cursor_size else 0
+            win_y = max(0, min(win_y, rows - actual_cursor_size)) if rows >= actual_cursor_size else 0
+            win_w = min(actual_cursor_size, cols)
+            win_h = min(actual_cursor_size, rows)
             
             # Get circle mode from table's viewer (same as stats box)
             if self._image_viewer is not None and hasattr(self._image_viewer, '_cursor_mode_circle'):
@@ -1216,7 +1224,11 @@ Max: {stats['hu_max']:8.2f}"""
                 has_hu=self._has_hu
             )
             
+            # Extract the window region for curve data storage
+            window_region = arr[win_y:win_y + win_h, win_x:win_x + win_w]
+            
             # Create measurement entry using stats from consolidated function
+            # Store window parameters and pixel data for curve comparison
             measurement = {
                 'x': x,
                 'y': y,
@@ -1231,7 +1243,16 @@ Max: {stats['hu_max']:8.2f}"""
                 'hu_std': stats['hu_std'],
                 'hu_min': stats['hu_min'],
                 'hu_max': stats['hu_max'],
-                'note': ''  # Free text field
+                'note': '',  # Free text field
+                # Window parameters for curve comparison
+                'win_x': win_x,
+                'win_y': win_y,
+                'win_w': win_w,
+                'win_h': win_h,
+                'slope': self._slope,
+                'intercept': self._intercept,
+                # Window pixel data for extracting curves
+                'window_pixels': window_region.tolist() if window_region.size > 0 else [],
             }
             
             # Emit signal to main window to add to measurements list
@@ -1265,8 +1286,11 @@ Max: {stats['hu_max']:8.2f}"""
         # Get physical Z from current dataset
         z = float(getattr(self._dataset, 'ImagePositionPatient', [0, 0, 0])[2])
         
-        # Get cursor size (window size for square, or diameter for circle)
-        cursor_size = max(win_w, win_h) if is_circle else max(win_w, win_h)
+        # Use the actual window dimensions as the cursor_size for this measurement
+        cursor_size = max(win_w, win_h) if is_circle else win_w
+        
+        # Extract the window region for curve data storage
+        window_region = arr[win_y:win_y + win_h, win_x:win_x + win_w]
         
         # Calculate statistics for current window
         stats = self.calculate_region_stats(
@@ -1292,7 +1316,16 @@ Max: {stats['hu_max']:8.2f}"""
             'hu_std': stats['hu_std'],
             'hu_min': stats['hu_min'],
             'hu_max': stats['hu_max'],
-            'note': ''
+            'note': '',
+            # Window parameters for curve comparison
+            'win_x': win_x,
+            'win_y': win_y,
+            'win_w': win_w,
+            'win_h': win_h,
+            'slope': self._slope,
+            'intercept': self._intercept,
+            # Window pixel data for extracting curves
+            'window_pixels': window_region.tolist() if window_region.size > 0 else [],
         }
         
         # Emit signal to main window to add to measurements list
@@ -1300,29 +1333,68 @@ Max: {stats['hu_max']:8.2f}"""
     
     def _on_cursor_window_size_changed(self, size: int):
         """Handler for cursor window size spin box changes."""
+        if self._updating_cursor_size:
+            return
+        self._updating_cursor_size = True
         self._cursor_window_size = size
-        self._update_highlight_region()
-        
-    def _on_viewer_cursor_size_changed(self, size: int):
-        """Handler for cursor size change from external viewer (wheel in measurement mode)."""
-        # Update the spinbox and trigger the same logic as spinbox change
-        if self._cursor_size_spin is not None:
-            self._cursor_size_spin.setValue(size)
-        # Redraw cursor rectangle with new size if we have a valid position
-        if (self._pixel_array is not None and self._image_viewer is not None and
-            self._last_cursor_x >= 0 and self._last_cursor_y >= 0):
-            # Recalculate and update with new size
+        # Sync to viewer
+        if self._image_viewer is not None:
+            self._image_viewer.set_cursor_window_size(size)
+        # Also update the table window and cursor rectangle
+        if self._pixel_array is not None and self._image_viewer is not None:
             arr = self._pixel_array[0] if self._pixel_array.ndim == 3 else self._pixel_array
             rows = arr.shape[0]
             cols = arr.shape[1]
             
+            # Use cursor_size as-is (don't force odd)
+            actual_cursor_size = max(1, size)
+            half_size = actual_cursor_size // 2
+            
+            # Use last cursor position, or center of image if not available
+            center_x = self._last_cursor_x if self._last_cursor_x >= 0 else cols // 2
+            center_y = self._last_cursor_y if self._last_cursor_y >= 0 else rows // 2
+            
+            win_x = max(0, min(center_x - half_size, cols - actual_cursor_size)) if cols >= actual_cursor_size else 0
+            win_y = max(0, min(center_y - half_size, rows - actual_cursor_size)) if rows >= actual_cursor_size else 0
+            win_w = min(actual_cursor_size, cols)
+            win_h = min(actual_cursor_size, rows)
+            
+            # Update table window
+            self._window_x = win_x
+            self._window_y = win_y
+            self._window_width = win_w
+            self._window_height = win_h
+            self._win_x_spin.setValue(win_x)
+            self._win_y_spin.setValue(win_y)
+            self._win_width_spin.setValue(win_w)
+            self._win_height_spin.setValue(win_h)
+            
+            # Update cursor rectangle in viewer
+            self._image_viewer.set_cursor_rect(win_x, win_y, win_w, win_h)
+        self._update_highlight_region()
+        self._update_models()
+        self._updating_cursor_size = False
+        
+    def _on_viewer_cursor_size_changed(self, size: int):
+        """Handler for cursor size change from external viewer (wheel in measurement mode)."""
+        if self._updating_cursor_size:
+            return
+        self._updating_cursor_size = True
+        self._cursor_window_size = size  # update before spinbox to avoid stale read below
+        if self._cursor_size_spin is not None:
+            self._cursor_size_spin.setValue(size)
+        # Redraw cursor rectangle with new size
+        if self._pixel_array is not None and self._image_viewer is not None:
+            arr = self._pixel_array[0] if self._pixel_array.ndim == 3 else self._pixel_array
+            rows = arr.shape[0]
+            cols = arr.shape[1]
+
             cursor_size = max(1, self._cursor_window_size)
-            if cursor_size % 2 == 0:
-                cursor_size += 1
             half_size = cursor_size // 2
             
-            center_x = self._last_cursor_x
-            center_y = self._last_cursor_y
+            # Use last cursor position, or center of image if not available
+            center_x = self._last_cursor_x if self._last_cursor_x >= 0 else cols // 2
+            center_y = self._last_cursor_y if self._last_cursor_y >= 0 else rows // 2
             
             win_x = max(0, min(center_x - half_size, cols - cursor_size)) if cols >= cursor_size else 0
             win_y = max(0, min(center_y - half_size, rows - cursor_size)) if rows >= cursor_size else 0
@@ -1345,6 +1417,7 @@ Max: {stats['hu_max']:8.2f}"""
             
             # Emit window changed signal to update curve
             self.window_changed.emit()
+        self._updating_cursor_size = False
     
     def _setup_ui(self):
         """Setup the widget layout."""
@@ -1694,11 +1767,20 @@ Max: {stats['hu_max']:8.2f}"""
         # Skip if we're in the middle of a zoom update
         if self._updating_zoom:
             return
-            
+
         self._window_x = self._win_x_spin.value()
         self._window_y = self._win_y_spin.value()
         self._window_width = self._win_width_spin.value()
         self._window_height = self._win_height_spin.value()
+
+        # Keep cursor size in sync so the next cursor movement doesn't revert the window
+        new_cursor_size = max(self._window_width, self._window_height)
+        if new_cursor_size != self._cursor_window_size:
+            self._cursor_window_size = new_cursor_size
+            if self._cursor_size_spin is not None and not self._updating_cursor_size:
+                self._cursor_size_spin.blockSignals(True)
+                self._cursor_size_spin.setValue(new_cursor_size)
+                self._cursor_size_spin.blockSignals(False)
         
         # Emit window changed signal
         self.window_changed.emit()
