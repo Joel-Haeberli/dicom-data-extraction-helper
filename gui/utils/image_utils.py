@@ -60,7 +60,7 @@ def dicom_to_qimage(ds: Dataset) -> Optional[QImage]:
             intercept = float(intercept)
         
         if slope != 1 or intercept != 0:
-            pixel_array = pixel_array * slope + intercept
+            pixel_array = pixel_array.astype(np.float32) * slope + intercept
         
         # Apply window center/width if available
         if hasattr(ds, 'WindowCenter') and hasattr(ds, 'WindowWidth'):
@@ -139,8 +139,14 @@ def _normalize_to_8bit(pixel_array: np.ndarray) -> np.ndarray:
     if pixel_array.dtype == np.uint8:
         return pixel_array
     elif pixel_array.dtype == np.uint16:
-        # Scale from 16-bit to 8-bit
-        return (pixel_array / 256).astype(np.uint8)
+        # Min-max normalize (handles 12-bit data stored in 16-bit containers)
+        pixel_array = pixel_array.astype(np.float32)
+        img_min = pixel_array.min()
+        img_max = pixel_array.max()
+        if img_max - img_min > 0:
+            return ((pixel_array - img_min) / (img_max - img_min) * 255).astype(np.uint8)
+        else:
+            return np.zeros_like(pixel_array, dtype=np.uint8)
     elif pixel_array.dtype == np.int16:
         # Handle signed 16-bit (common for CT)
         # First convert to float for proper scaling
@@ -220,10 +226,10 @@ def _numpy_to_qimage_rgb(pixel_array: np.ndarray, width: int, height: int) -> QI
     
     # Ensure we have 3 or 4 channels
     if pixel_array.shape[2] == 4:
-        # RGBA
+        # RGBA — use Format_RGBA8888 so byte order matches numpy [R, G, B, A]
         pixel_array = pixel_array.astype(np.uint8)
         bytes_data = pixel_array.tobytes()
-        qimage = QImage(bytes_data, width, height, QImage.Format_ARGB32)
+        qimage = QImage(bytes_data, width, height, QImage.Format_RGBA8888)
     else:
         # RGB - need to convert to ARGB format
         pixel_array = pixel_array.astype(np.uint8)
@@ -249,15 +255,14 @@ def _ybr_to_rgb(pixel_array: np.ndarray) -> np.ndarray:
     """
     # For 3D array with YBR values
     if pixel_array.ndim == 3 and pixel_array.shape[2] == 3:
-        # YBR to RGB conversion matrix
-        # This is a simplified conversion
+        # DICOM YBR_FULL: Y in [0,255], Cb and Cr in [0,255] centered at 128
         ybr = pixel_array.astype(np.float32)
-        rgb = np.zeros_like(ybr)
-        
-        rgb[..., 0] = ybr[..., 0] + 1.402 * ybr[..., 2]  # R = Y + 1.402*V
-        rgb[..., 1] = ybr[..., 0] - 0.344136 * ybr[..., 1] - 0.714136 * ybr[..., 2]  # G = Y - 0.344*Cb - 0.714*Cr
-        rgb[..., 2] = ybr[..., 0] + 1.772 * ybr[..., 1]  # B = Y + 1.772*Cb
-        
+        rgb = np.empty_like(ybr)
+        cb = ybr[..., 1] - 128.0
+        cr = ybr[..., 2] - 128.0
+        rgb[..., 0] = ybr[..., 0] + 1.402 * cr
+        rgb[..., 1] = ybr[..., 0] - 0.344136 * cb - 0.714136 * cr
+        rgb[..., 2] = ybr[..., 0] + 1.772 * cb
         rgb = np.clip(rgb, 0, 255).astype(np.uint8)
         return rgb
     
@@ -392,12 +397,14 @@ def extract_overlay_with_origin(ds: Dataset, overlay_index: int = 0) -> Optional
                     continue
                 
                 # Get origin - defaults to (0, 0) if not specified
+                # DICOM OverlayOrigin (60xx,0050) is [row, column] with 1-based indexing
+                # row = Y axis, column = X axis
                 origin_x, origin_y = 0, 0
                 if origin_tag in ds:
                     origin = ds[origin_tag].value
                     if isinstance(origin, (list, tuple)) and len(origin) >= 2:
-                        origin_x = int(origin[0])
-                        origin_y = int(origin[1])
+                        origin_y = int(origin[0]) - 1  # row → Y, convert to 0-based
+                        origin_x = int(origin[1]) - 1  # column → X, convert to 0-based
                 
                 return (overlay_array, origin_x, origin_y)
         
@@ -481,8 +488,8 @@ def overlay_to_qimage(
         
         # Convert to QImage
         bytes_data = rgba_array.tobytes()
-        qimage = QImage(bytes_data, base_width, base_height, QImage.Format_ARGB32)
-        
+        qimage = QImage(bytes_data, base_width, base_height, QImage.Format_RGBA8888)
+
         if qimage.isNull():
             print(f"Warning: Created null QImage for overlay")
             return None
@@ -600,7 +607,7 @@ def _qimage_to_numpy(qimage: QImage) -> Optional[np.ndarray]:
         height = qimage.height()
         
         ptr = qimage.bits()
-        ptr.setsize(qimage.byteCount())
+        ptr.setsize(qimage.sizeInBytes())
         arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 4))
         return arr
     except Exception as e:

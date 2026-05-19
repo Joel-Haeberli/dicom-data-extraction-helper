@@ -8,10 +8,9 @@ Reuses TAG_CATEGORIES from dicom_header_extractor.py for consistent ordering.
 
 from typing import Any, Dict
 
-from PySide6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
-from PySide6.QtCore import Qt, Signal, QEnum
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 
 try:
     from dicom_header_extractor import TAG_CATEGORIES, format_value

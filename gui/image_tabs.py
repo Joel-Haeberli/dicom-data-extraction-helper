@@ -11,7 +11,6 @@ from typing import Optional
 from PySide6.QtWidgets import QTabWidget, QWidget, QVBoxLayout
 from PySide6.QtCore import Qt
 
-from gui.image_viewer import ImageViewer
 from gui.pixel_array_table import PixelArrayTable
 
 
@@ -49,6 +48,10 @@ class ImageTabs(QTabWidget):
     def pixel_array_table(self):
         """Access the pixel array table widget."""
         return self._pixel_array_table
+
+    def create_image_viewer(self):
+        """Create and return the image viewer widget (delegates to PixelArrayTable)."""
+        return self._pixel_array_table.create_image_viewer()
     
     def set_dataset(self, ds):
         """

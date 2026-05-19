@@ -11,12 +11,14 @@ The main application window with two-column layout:
 from pathlib import Path
 from typing import Optional, List
 import csv
+import json
 import numpy as np
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QPushButton, QLabel, QSpinBox,
     QHBoxLayout, QVBoxLayout, QMessageBox, QFileDialog,
-    QColorDialog, QCheckBox, QTableWidget, QTableWidgetItem
+    QColorDialog, QCheckBox, QTableWidget, QTableWidgetItem,
+    QApplication
 )
 from PySide6.QtCore import Qt, Signal, QSize, QEvent
 from PySide6.QtGui import QIcon, QWheelEvent, QColor
@@ -65,14 +67,12 @@ class MainWindow(QMainWindow):
         self._measurements: List[dict] = []  # List of measurement entries
         self._current_study_uid: str = ''  # Current study UID for linking measurements
         self._current_series_uid: str = ''  # Current series UID for linking measurements
-        self._image_viewer_window = None  # Reference to external image viewer window
         self._current_curve_row: int = 0  # Current row selected for HU profile curve
         
         # Create UI
         self._create_widgets()
         self._setup_layout()
-        self._connect_signals()
-        
+
         # Enable mouse wheel on the central widget
         self._central_widget.setFocusPolicy(Qt.StrongFocus)
         
@@ -82,7 +82,6 @@ class MainWindow(QMainWindow):
         self._image_tabs.pixel_array_table.image_index_changed.connect(self._on_image_index_changed)
         self._image_tabs.pixel_array_table.overlay_color_changed.connect(self._set_overlay_color)
         self._image_tabs.pixel_array_table.add_measurement_requested.connect(self._on_add_measurement)
-        self._image_tabs.pixel_array_table.viewer_reopened.connect(self._on_viewer_reopened)
         self._image_tabs.pixel_array_table.window_changed.connect(self._update_curve_from_window)
         
         # Connect curve view row changed signal
@@ -95,39 +94,16 @@ class MainWindow(QMainWindow):
         self.setAttribute(Qt.WA_DeleteOnClose)
     
     def closeEvent(self, event):
-        """Close event handler - closes external image viewer window."""
-        # Close external image viewer if it exists
-        if (hasattr(self, '_image_tabs') and self._image_tabs is not None and
-            hasattr(self._image_tabs, 'pixel_array_table') and
-            self._image_tabs.pixel_array_table is not None and
-            hasattr(self._image_tabs.pixel_array_table, '_image_viewer_window') and
-            self._image_tabs.pixel_array_table._image_viewer_window is not None):
-            self._image_tabs.pixel_array_table._image_viewer_window.close()
-            self._image_tabs.pixel_array_table._image_viewer_window = None
+        """Close all windows and exit when the main window is closed."""
+        self._image_window.hide()
         event.accept()
-    
-    def _on_viewer_reopened(self):
-        """Handler for when the image viewer window is reopened.
-        Updates navigation and reloads overlay."""
-        self._update_navigation_ui()
-        self._load_overlay_for_current_file()
-    
+        QApplication.quit()
+
     def _on_show_image_window_clicked(self):
-        """Handler for Show Image Window button click.
-        Reopens the external image viewer if it's closed."""
-        if (hasattr(self, '_image_tabs') and self._image_tabs is not None and
-            hasattr(self._image_tabs, 'pixel_array_table') and
-            self._image_tabs.pixel_array_table is not None):
-            
-            pixel_table = self._image_tabs.pixel_array_table
-            
-            # Use the public method to open/reopen the viewer with current dataset
-            if hasattr(pixel_table, 'open_image_viewer_window'):
-                # Pass current dataset if available
-                current_dataset = None
-                if self._current_dicom_file is not None:
-                    current_dataset = self._current_dicom_file.dataset
-                pixel_table.open_image_viewer_window(current_dataset)
+        """Show the image viewer window (re-open if hidden)."""
+        self._image_window.show()
+        self._image_window.raise_()
+        self._image_window.activateWindow()
     
     def _create_widgets(self):
         """Create all child widgets."""
@@ -138,7 +114,7 @@ class MainWindow(QMainWindow):
         # Top controls - Load button removed, replaced by explorer
         # Show image window button
         self._show_image_window_button = QPushButton("Show Image Window", self)
-        self._show_image_window_button.setToolTip("Open or reopen the image viewer window")
+        self._show_image_window_button.setToolTip("Show the image viewer dock panel (re-open if closed)")
         self._show_image_window_button.clicked.connect(self._on_show_image_window_clicked)
         
         # DICOM Explorer widget
@@ -238,14 +214,33 @@ class MainWindow(QMainWindow):
         self._export_current_window_button.clicked.connect(self._on_export_current_window)
         self._export_current_window_button.setEnabled(False)
         
+        # Save / Load buttons for measurements
+        self._save_measurements_button = QPushButton("Save Measurements", self)
+        self._save_measurements_button.setToolTip("Save all measurements to a JSON file")
+        self._save_measurements_button.clicked.connect(self._on_save_measurements)
+
+        self._load_measurements_button = QPushButton("Load Measurements", self)
+        self._load_measurements_button.setToolTip("Load measurements from a JSON file (appends to current list)")
+        self._load_measurements_button.clicked.connect(self._on_load_measurements)
+
         # Connect cell change signal to update notes
         self._measurements_table.cellChanged.connect(self._on_measurement_cell_changed)
         # Connect cell click signal for delete button
         self._measurements_table.cellClicked.connect(self._on_measurement_cell_clicked)
         
-        # Image tabs (right column) - contains image viewer and pixel array table
+        # Image tabs (right column) - contains pixel array table
         self._image_tabs = ImageTabs(self)
-    
+
+        # Image viewer - standalone OS window that hides on close (preserves state)
+        image_viewer_widget = self._image_tabs.create_image_viewer()
+        self._image_window = QWidget(None, Qt.Window)
+        self._image_window.setWindowTitle("Image Viewer")
+        window_layout = QVBoxLayout(self._image_window)
+        window_layout.setContentsMargins(0, 0, 0, 0)
+        window_layout.addWidget(image_viewer_widget)
+        self._image_window.closeEvent = lambda e: (e.ignore(), self._image_window.hide())
+        self._image_window.resize(800, 700)
+
     def _setup_layout(self):
         """Setup the main layout."""
         # Main layout for central widget
@@ -299,19 +294,23 @@ class MainWindow(QMainWindow):
         export_layout.addWidget(self._compare_curves_button, 0)
         
         export_layout.addStretch(1)
-        
+
+        # Save / Load buttons row
+        session_layout = QHBoxLayout()
+        session_layout.addWidget(self._save_measurements_button, 0)
+        session_layout.addWidget(self._load_measurements_button, 0)
+        session_layout.addStretch(1)
+
         measurements_layout.addLayout(export_layout, 0)
+        measurements_layout.addLayout(session_layout, 0)
         
         # Combine layouts
         main_layout.addLayout(top_layout, 0)
         main_layout.addLayout(columns_layout, 1)
         main_layout.addLayout(measurements_layout, 0)
-    
-    def _connect_signals(self):
-        """Connect signals between widgets."""
-        # Load button removed - explorer signal connected in _create_widgets
-        # Navigation and overlay controls are now in external image viewer
-        # Connections will be made when viewer is created
+
+        # Show image viewer window on startup
+        self._image_window.show()
     
     def _load_dicom_directory(self, directory: Path):
         """
@@ -776,6 +775,97 @@ class MainWindow(QMainWindow):
             
             self._curve_view.set_data(x_values, hu_values)
     
+    @staticmethod
+    def _measurement_json_default(obj):
+        """JSON serialization fallback for non-standard types in measurement dicts."""
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, tuple):
+            return list(obj)
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+    def _on_save_measurements(self):
+        """Save all measurements to a JSON file."""
+        if not self._measurements:
+            QMessageBox.information(self, "No Measurements", "No measurements to save.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Measurements", "", "JSON Files (*.json);;All Files (*)"
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith('.json'):
+            file_path += '.json'
+
+        try:
+            payload = {
+                "version": 1,
+                "measurements": self._measurements,
+            }
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, indent=2, default=self._measurement_json_default)
+            QMessageBox.information(
+                self, "Saved",
+                f"Saved {len(self._measurements)} measurement(s) to:\n{file_path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Save Failed", f"Failed to save measurements:\n{str(e)}")
+
+    def _on_load_measurements(self):
+        """Load measurements from a JSON file and append to the current list."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Load Measurements", "", "JSON Files (*.json);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                payload = json.load(f)
+
+            if not isinstance(payload, dict) or 'measurements' not in payload:
+                QMessageBox.warning(
+                    self, "Invalid File",
+                    "The selected file does not contain valid measurement data."
+                )
+                return
+
+            loaded: list = payload['measurements']
+            if not isinstance(loaded, list):
+                QMessageBox.warning(self, "Invalid File", "Measurements entry is not a list.")
+                return
+
+            # Restore pixel_spacing as a tuple (JSON serializes tuples as arrays)
+            for m in loaded:
+                ps = m.get('pixel_spacing')
+                if isinstance(ps, list) and len(ps) == 2:
+                    m['pixel_spacing'] = tuple(ps)
+                elif ps is not None and not isinstance(ps, tuple):
+                    m['pixel_spacing'] = None  # discard unrecognised format
+
+            count = len(loaded)
+            self._measurements.extend(loaded)
+            self._update_measurements_table()
+
+            if self._measurements:
+                self._export_region_series_button.setEnabled(True)
+                self._compare_curves_button.setEnabled(True)
+
+            QMessageBox.information(
+                self, "Loaded",
+                f"Loaded {count} measurement(s) from:\n{file_path}\n\n"
+                f"Total measurements: {len(self._measurements)}"
+            )
+        except json.JSONDecodeError as e:
+            QMessageBox.critical(self, "Load Failed", f"File is not valid JSON:\n{str(e)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Load Failed", f"Failed to load measurements:\n{str(e)}")
+
     def _on_export_measurements(self):
         """Export measurements to CSV file."""
         if not self._measurements:

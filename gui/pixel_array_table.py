@@ -915,7 +915,6 @@ class PixelArrayTable(QWidget):
     measurement_mode_changed = Signal(bool)  # Forward from viewer
     measurement_captured = Signal(dict)  # Measurement data dictionary (forwarded from viewer)
     add_measurement_requested = Signal(dict)  # Request to add measurement to main window
-    viewer_reopened = Signal()  # Emitted when image viewer window is reopened
     window_changed = Signal()  # Emitted when window position/size changes
     
     def __init__(self, parent=None):
@@ -960,9 +959,8 @@ class PixelArrayTable(QWidget):
         # Pixel spacing from DICOM tag (0028,0030): (row_mm, col_mm) or None
         self._pixel_spacing: Optional[tuple] = None
         
-        # Image viewer for cursor tracking
+        # Image viewer for cursor tracking (created externally via create_image_viewer())
         self._image_viewer: Optional[ImageViewerWithMouseTracking] = None
-        self._image_viewer_window = None
         
         # Last cursor position for redrawing when size changes
         self._last_cursor_x: int = -1
@@ -1019,12 +1017,13 @@ class PixelArrayTable(QWidget):
         self._window_width = win_w
         self._window_height = win_h
         
-        # Update spin boxes
-        self._win_x_spin.setValue(win_x)
-        self._win_y_spin.setValue(win_y)
-        self._win_width_spin.setValue(win_w)
-        self._win_height_spin.setValue(win_h)
-        
+        # Update spin boxes (block signals to avoid re-entrant _on_window_changed calls)
+        for spin, val in ((self._win_x_spin, win_x), (self._win_y_spin, win_y),
+                          (self._win_width_spin, win_w), (self._win_height_spin, win_h)):
+            spin.blockSignals(True)
+            spin.setValue(val)
+            spin.blockSignals(False)
+
         # Update image viewer with cursor rectangle
         if self._image_viewer is not None:
             self._image_viewer.set_cursor_rect(win_x, win_y, win_w, win_h)
@@ -1680,111 +1679,47 @@ Max: {stats['hu_max']:8.2f}"""
             self._pixel_array = None
             self._clear_tables()
     
-    def _on_viewer_window_destroyed(self, obj=None):
-        """Handler for when the viewer window is destroyed/closed by user."""
-        # Clean up references so we know to recreate the window next time
-        self._image_viewer_window = None
-        self._image_viewer = None
-    
-    def open_image_viewer_window(self, dataset=None):
-        """Public method to open/reopen the image viewer window.
-        Called from main window's Show Image Window button.
-        
-        Args:
-            dataset: Optional dataset to display. If None, uses self._dataset.
+    def create_image_viewer(self) -> ImageViewerWithMouseTracking:
+        """Create the image viewer widget, wire its signals, and return it.
+
+        Called once by the parent window during startup. The returned widget is
+        placed inside a QDockWidget — this class never manages a window itself.
         """
-        # Use provided dataset or fall back to current dataset
-        ds = dataset if dataset is not None else self._dataset
-        
-        if ds is not None and hasattr(ds, 'pixel_array') and ds.pixel_array is not None:
-            # Check if window exists but is not visible (was closed by user)
-            window_was_closed = (self._image_viewer_window is not None and 
-                               not self._image_viewer_window.isVisible())
-            
-            # Clear viewer references so set_dataset will create a new window
-            if window_was_closed:
-                self._image_viewer_window = None
-                self._image_viewer = None
-            
-            # Call set_dataset which will update all state and open viewer
-            self.set_dataset(ds)
-            
-            # Emit signal if window was recreated so main window can update navigation
-            if window_was_closed and self._image_viewer_window is not None:
-                self.viewer_reopened.emit()
-        elif self._image_viewer_window is not None and self._image_viewer_window.isVisible():
-            # Window exists and is visible, just raise it
-            self._image_viewer_window.raise_()
-            self._image_viewer_window.activateWindow()
-    
+        self._image_viewer = ImageViewerWithMouseTracking()
+
+        self._image_viewer.position_changed.connect(self._on_cursor_position_changed)
+        self._image_viewer.next_requested.connect(self.next_image_requested)
+        self._image_viewer.prev_requested.connect(self.prev_image_requested)
+        self._image_viewer.image_index_changed.connect(self.image_index_changed)
+        self._image_viewer.overlay_color_changed.connect(self.overlay_color_changed)
+        self._image_viewer.cursor_size_changed.connect(self._on_viewer_cursor_size_changed)
+        self._image_viewer.cursor_mode_changed.connect(self._on_viewer_cursor_mode_changed)
+        self._image_viewer.measurement_mode_changed.connect(self._on_viewer_measurement_mode_changed)
+        self._image_viewer.measurement_captured.connect(self._on_measurement_captured)
+
+        self._image_viewer.set_overlay_color(self._overlay_color)
+        self._image_viewer.set_cursor_window_size(self._cursor_window_size)
+        self._image_viewer.set_cursor_mode_circle(self._cursor_mode_circle)
+        self._image_viewer.set_measurement_mode(self._measurement_mode_enabled)
+
+        return self._image_viewer
+
     def _open_or_update_image_viewer(self, ds: Dataset):
-        """Open or update the image viewer window for the current dataset.
-        Reuses existing window if available."""
-        if not HAS_IMAGE_UTILS:
-            print("Warning: image_utils not available, cannot open image viewer")
+        """Update the image viewer with the current dataset's image."""
+        if self._image_viewer is None or not HAS_IMAGE_UTILS:
             return
-        
         try:
-            # Convert DICOM to QImage
             qimage = dicom_to_qimage(ds)
             if qimage is None:
-                print("Warning: Could not convert DICOM to QImage")
                 return
-            
-            # If viewer doesn't exist yet, or window was closed, create new one
-            if self._image_viewer is None or self._image_viewer_window is None:
-                # Create image viewer
-                self._image_viewer = ImageViewerWithMouseTracking()
-                
-                # Connect signals
-                self._image_viewer.position_changed.connect(self._on_cursor_position_changed)
-                self._image_viewer.next_requested.connect(self.next_image_requested)
-                self._image_viewer.prev_requested.connect(self.prev_image_requested)
-                self._image_viewer.image_index_changed.connect(self.image_index_changed)
-                self._image_viewer.overlay_color_changed.connect(self.overlay_color_changed)
-                self._image_viewer.cursor_size_changed.connect(self._on_viewer_cursor_size_changed)
-                self._image_viewer.cursor_mode_changed.connect(self._on_viewer_cursor_mode_changed)
-                self._image_viewer.measurement_mode_changed.connect(self._on_viewer_measurement_mode_changed)
-                self._image_viewer.measurement_captured.connect(self._on_measurement_captured)
-                # Set initial overlay color
-                self._image_viewer.set_overlay_color(self._overlay_color if hasattr(self, '_overlay_color') else (255, 0, 0))
-                # Set initial cursor window size
-                self._image_viewer.set_cursor_window_size(self._cursor_window_size)
-                # Set initial cursor mode
-                self._image_viewer.set_cursor_mode_circle(self._cursor_mode_circle)
-                # Set initial measurement mode
-                self._image_viewer.set_measurement_mode(self._measurement_mode_enabled)
-                # Sync last cursor position from PixelArrayTable to viewer
-                if self._last_cursor_x >= 0 and self._last_cursor_y >= 0:
-                    self._image_viewer._last_cursor_x = self._last_cursor_x
-                    self._image_viewer._last_cursor_y = self._last_cursor_y
-                
-                # Create a simple window (no parent = top-level window)
-                self._image_viewer_window = QWidget(None)
-                self._image_viewer_window.setWindowTitle("DICOM Image - Move cursor to update table, Wheel: size (Measurement) / navigate (Disabled)")
-                self._image_viewer_window.setGeometry(100, 100, 800, 600)
-                layout = QVBoxLayout(self._image_viewer_window)
-                layout.setContentsMargins(0, 0, 0, 0)
-                layout.addWidget(self._image_viewer)
-                
-                # Set up close event handler for the window
-                self._image_viewer_window.destroyed.connect(self._on_viewer_window_destroyed)
-                
-                # Show window
-                self._image_viewer_window.show()
-            
-            # Update image in existing viewer
             self._image_viewer.set_image(qimage)
             self._image_viewer.clear_cursor_rect()
             self._last_cursor_x = -1
             self._last_cursor_y = -1
-            
         except Exception as e:
-            print(f"Error opening/updating image viewer: {e}")
+            print(f"Error updating image viewer: {e}")
             import traceback
             traceback.print_exc()
-            self._image_viewer = None
-            self._image_viewer_window = None
     
     def _on_window_changed(self):
         """Handler for window position/size spin box changes."""
@@ -1907,10 +1842,6 @@ Max: {stats['hu_max']:8.2f}"""
         if region.size == 0 or region.shape != (actual_h, actual_w):
             return None
         
-        # Apply HU conversion
-        slope = getattr(self._dataset, 'RescaleSlope', 1.0)
-        intercept = getattr(self._dataset, 'RescaleIntercept', 0.0)
-        
         # Reshape to (chunks_y, factor, chunks_x, factor)
         chunked = region.reshape(chunks_y, factor, chunks_x, factor)
         
@@ -1918,7 +1849,7 @@ Max: {stats['hu_max']:8.2f}"""
         averaged = np.mean(chunked, axis=(1, 3))
         
         # Apply HU conversion
-        hu_averaged = averaged * slope + intercept
+        hu_averaged = averaged * self._slope + self._intercept
         
         self._zoom_chunks_x = chunks_x
         self._zoom_chunks_y = chunks_y

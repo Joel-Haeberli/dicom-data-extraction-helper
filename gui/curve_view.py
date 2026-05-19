@@ -10,11 +10,11 @@ import numpy as np
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QDoubleSpinBox, QSizePolicy, QSpinBox, QPushButton, QFileDialog
+    QDoubleSpinBox, QSizePolicy, QSpinBox, QPushButton, QFileDialog, QCheckBox
 )
 from PySide6.QtCore import Qt, Signal, QDateTime
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis, QSplineSeries
-from PySide6.QtGui import QImage, QPainter
+from PySide6.QtGui import QImage, QPainter, QColor
 
 
 class CurveView(QWidget):
@@ -53,8 +53,14 @@ class CurveView(QWidget):
         # Chart components
         self._chart: Optional[QChart] = None
         self._series: Optional[QSplineSeries] = None
+        self._regression_series: Optional[QLineSeries] = None
         self._chart_view: Optional[QChartView] = None
-        
+
+        # Regression UI
+        self._regression_checkbox: Optional[QCheckBox] = None
+        self._regression_label: Optional[QLabel] = None
+        self._show_regression: bool = True
+
         # Axis range inputs
         self._x_min_input: Optional[QDoubleSpinBox] = None
         self._x_max_input: Optional[QDoubleSpinBox] = None
@@ -85,7 +91,16 @@ class CurveView(QWidget):
         self._series.setName("HU Values")
         self._series.setColor(Qt.cyan)  # Cyan for dark mode visibility
         self._chart.addSeries(self._series)
-        
+
+        # Linear regression overlay
+        self._regression_series = QLineSeries()
+        self._regression_series.setName("Linear Regression")
+        pen = self._regression_series.pen()
+        pen.setColor(QColor(255, 165, 0))  # orange
+        pen.setWidth(2)
+        self._regression_series.setPen(pen)
+        self._chart.addSeries(self._regression_series)
+
         # Create axes
         self._axis_x = QValueAxis()
         self._axis_x.setTitleText("X Position (window-relative)")
@@ -102,6 +117,8 @@ class CurveView(QWidget):
         
         self._series.attachAxis(self._axis_x)
         self._series.attachAxis(self._axis_y)
+        self._regression_series.attachAxis(self._axis_x)
+        self._regression_series.attachAxis(self._axis_y)
         
         self._chart_view = QChartView(self._chart)
         self._chart_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -145,11 +162,22 @@ class CurveView(QWidget):
         self._y_max_input.setDecimals(2)
         controls_layout.addWidget(self._y_max_input)
         
+        # Linear regression toggle + equation label
+        self._regression_checkbox = QCheckBox("Lin. Reg.")
+        self._regression_checkbox.setChecked(True)
+        self._regression_checkbox.setToolTip("Show/hide linear regression line")
+        controls_layout.addWidget(self._regression_checkbox)
+
+        self._regression_label = QLabel("")
+        self._regression_label.setStyleSheet("color: rgb(255,165,0); font-size: 10px;")
+        self._regression_label.setToolTip("Linear regression: slope, intercept, R²")
+        controls_layout.addWidget(self._regression_label)
+
         # Export button
         self._export_button = QPushButton("Export PNG")
         self._export_button.setToolTip("Export the curve as PNG image")
         controls_layout.addWidget(self._export_button)
-        
+
         main_layout.addLayout(controls_layout, 0)
     
     def _setup_connections(self):
@@ -166,6 +194,8 @@ class CurveView(QWidget):
             self._y_max_input.valueChanged.connect(self._on_axis_range_changed)
         if self._export_button:
             self._export_button.clicked.connect(self._on_export_png)
+        if self._regression_checkbox:
+            self._regression_checkbox.toggled.connect(self._on_regression_toggled)
     
     def _on_row_changed(self, value: int):
         """Handler for row selector changes."""
@@ -276,18 +306,59 @@ class CurveView(QWidget):
         y_min -= 20
         y_max += 20
         
-        # Update inputs to show current data ranges
-        if self._x_min_input:
-            self._x_min_input.setValue(x_min)
-        if self._x_max_input:
-            self._x_max_input.setValue(x_max)
-        if self._y_min_input:
-            self._y_min_input.setValue(y_min)
-        if self._y_max_input:
-            self._y_max_input.setValue(y_max)
-        
+        # Update inputs to show current data ranges without triggering manual-mode lock
+        for spin, val in (
+            (self._x_min_input, x_min), (self._x_max_input, x_max),
+            (self._y_min_input, y_min), (self._y_max_input, y_max),
+        ):
+            if spin:
+                spin.blockSignals(True)
+                spin.setValue(val)
+                spin.blockSignals(False)
+
+        self._update_regression()
         self._update_axes()
-    
+
+    def _update_regression(self):
+        """Recompute and redraw the linear regression line from current data."""
+        if self._regression_series is None:
+            return
+        self._regression_series.clear()
+        if self._regression_label:
+            self._regression_label.setText("")
+
+        if len(self._x_values) < 2:
+            return
+
+        x = np.array(self._x_values)
+        y = np.array(self._y_values)
+        slope, intercept = np.polyfit(x, y, 1)
+
+        # R²
+        y_pred = slope * x + intercept
+        ss_res = np.sum((y - y_pred) ** 2)
+        ss_tot = np.sum((y - y.mean()) ** 2)
+        r2 = 1.0 - ss_res / ss_tot if ss_tot != 0 else 1.0
+
+        x_min, x_max = x.min(), x.max()
+        self._regression_series.append(x_min, slope * x_min + intercept)
+        self._regression_series.append(x_max, slope * x_max + intercept)
+
+        if self._regression_label:
+            self._regression_label.setText(
+                f"y = {slope:.3f}x + {intercept:.1f}   R²={r2:.4f}"
+            )
+
+        self._regression_series.setVisible(self._show_regression)
+
+    def _on_regression_toggled(self, checked: bool):
+        """Show or hide the regression line."""
+        self._show_regression = checked
+        if self._regression_series:
+            self._regression_series.setVisible(checked)
+        if self._regression_label:
+            self._regression_label.setVisible(checked)
+
     def _update_axes(self):
         """Update axis ranges based on manual or automatic mode."""
         if not self._axis_x or not self._axis_y:
@@ -318,6 +389,10 @@ class CurveView(QWidget):
         """Clear the curve data."""
         if self._series:
             self._series.clear()
+        if self._regression_series:
+            self._regression_series.clear()
+        if self._regression_label:
+            self._regression_label.setText("")
         self._x_values = []
         self._y_values = []
         
