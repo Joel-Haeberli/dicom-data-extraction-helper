@@ -241,6 +241,11 @@ class MainWindow(QMainWindow):
         self._image_window.closeEvent = lambda e: (e.ignore(), self._image_window.hide())
         self._image_window.resize(800, 700)
 
+        # Connect profile-view "load different image" signal
+        pv = self._image_tabs.pixel_array_table._profile_view
+        if pv is not None:
+            pv.load_file_requested.connect(self._on_profile_load_file)
+
     def _setup_layout(self):
         """Setup the main layout."""
         # Main layout for central widget
@@ -405,20 +410,25 @@ class MainWindow(QMainWindow):
     def _display_dicom_file(self, dicom_file: DICOMFile):
         """
         Display a DICOM file's metadata and image.
-        
+
         Args:
             dicom_file: DICOMFile to display
         """
         self._current_dicom_file = dicom_file
-        
+
         # Display image and pixel data
         if dicom_file.dataset and dicom_file.is_image:
             # Set dataset on image tabs (handles both image and lazy pixel data loading)
             self._image_tabs.set_dataset(dicom_file.dataset)
-            
+
+            # Tell the profile view which file is now active
+            pv = self._image_tabs.pixel_array_table._profile_view
+            if pv is not None:
+                pv.set_image_path(str(dicom_file.filepath))
+
             # Try to find and display overlay
             self._load_overlay_for_current_file()
-            
+
             # Update curve view with first row of default window
             self._update_curve_from_window()
     
@@ -450,6 +460,38 @@ class MainWindow(QMainWindow):
             self._update_navigation_ui()
             self._update_current_selection(self._image_files[self._current_image_index].filepath.name)
     
+
+    def _on_profile_load_file(self, path: str):
+        """Load a specific DICOM file by path (requested from profile-view measurement click)."""
+        target = Path(path)
+
+        def _try_navigate() -> bool:
+            for match_fn in (lambda f: f.filepath == target,
+                             lambda f: f.filepath.name == target.name):
+                for i, img_file in enumerate(self._image_files):
+                    if match_fn(img_file):
+                        if i != self._current_image_index:
+                            self._current_image_index = i
+                            self._display_dicom_file(img_file)
+                            self._update_navigation_ui()
+                            self._update_current_selection(img_file.filepath.name)
+                        return True
+            return False
+
+        if _try_navigate():
+            return
+
+        # Not in the current series — if the file exists, load its directory first.
+        if target.exists() and target.parent.is_dir():
+            self._load_dicom_directory(target.parent)
+            if _try_navigate():
+                return
+
+        QMessageBox.warning(
+            self, "Image Not Found",
+            f"The measurement's image was not found:\n{target.name}\n\n"
+            f"Please load the DICOM directory that contains this file."
+        )
 
     def eventFilter(self, obj, event: QEvent):
         """
@@ -502,13 +544,17 @@ class MainWindow(QMainWindow):
         if pixel_table is not None:
             # Update Z index in viewer
             pixel_table.set_viewer_z_index(self._current_image_index)
-            
-            # Update navigation UI in viewer
+
+            # Update navigation UI in image viewer
             viewer = pixel_table._image_viewer
             if viewer is not None:
                 viewer.set_navigation(current, total)
                 viewer._prev_button.setEnabled(self._current_image_index > 0)
                 viewer._next_button.setEnabled(self._current_image_index < total - 1)
+
+            # Update navigation spinbox in profile view
+            if pixel_table._profile_view is not None:
+                pixel_table._profile_view.set_navigation(current, total)
     
     def _on_add_measurement(self, measurement: dict):
         """Handler for adding a new measurement.

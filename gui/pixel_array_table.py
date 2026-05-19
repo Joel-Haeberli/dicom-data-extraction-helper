@@ -30,6 +30,8 @@ try:
 except ImportError:
     HAS_IMAGE_UTILS = False
 
+from gui.stack_position_widget import StackPositionWidget
+
 
 class PixelArrayModel(QAbstractTableModel):
     """
@@ -421,6 +423,7 @@ class ImageViewerWithMouseTracking(QWidget):
         self._image: Optional[QImage] = None
         self._pixmap: Optional[QPixmap] = None
         self._stats_label: Optional[QLabel] = None
+        self._stack_widget: Optional[StackPositionWidget] = None
         self._cursor_mode_circle: bool = True  # Default to circle
         self._overlay_color: tuple = (0, 255, 255)  # Default: cyan (better for dark mode)
         self._measurement_mode_enabled: bool = True  # Default: enabled
@@ -486,12 +489,17 @@ class ImageViewerWithMouseTracking(QWidget):
         stats_layout.setSpacing(4)
         
         stats_layout.addWidget(QLabel("<b>Window Statistics</b>", self))
-        
+
         self._stats_label = QLabel("No data loaded", self)
         self._stats_label.setFrameStyle(QFrame.Panel | QFrame.Sunken)
         self._stats_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self._stats_label.setWordWrap(True)
         stats_layout.addWidget(self._stats_label, 1)
+
+        # 3-D stack position visualizer
+        stats_layout.addWidget(QLabel("<b>Stack Position</b>", self))
+        self._stack_widget = StackPositionWidget(self)
+        stats_layout.addWidget(self._stack_widget, 0)
         
         # Add columns to top row
         top_row.addWidget(image_container, 1)  # Image takes 2/3
@@ -611,6 +619,9 @@ class ImageViewerWithMouseTracking(QWidget):
         self._image_spinbox.setMaximum(max(total, 1))
         self._image_spinbox.setValue(current)
         self._image_count_label.setText(f"/{total}")
+        if self._stack_widget is not None:
+            self._stack_widget.set_stack(total)
+            self._stack_widget.set_current(current)
     
     def set_overlay_color(self, color: tuple):
         """Set the overlay color."""
@@ -961,6 +972,8 @@ class PixelArrayTable(QWidget):
         
         # Image viewer for cursor tracking (created externally via create_image_viewer())
         self._image_viewer: Optional[ImageViewerWithMouseTracking] = None
+        # Profile view (second tab, created alongside the image viewer)
+        self._profile_view = None
         
         # Last cursor position for redrawing when size changes
         self._last_cursor_x: int = -1
@@ -1678,13 +1691,22 @@ Max: {stats['hu_max']:8.2f}"""
             print(f"Error loading pixel array: {e}")
             self._pixel_array = None
             self._clear_tables()
-    
-    def create_image_viewer(self) -> ImageViewerWithMouseTracking:
-        """Create the image viewer widget, wire its signals, and return it.
 
-        Called once by the parent window during startup. The returned widget is
-        placed inside a QDockWidget — this class never manages a window itself.
+        # Forward to profile view
+        if self._profile_view is not None:
+            self._profile_view.set_dataset(ds, self._slope, self._intercept)
+    
+    def create_image_viewer(self) -> QTabWidget:
+        """Create the image viewer tab widget, wire signals, and return it.
+
+        Returns a QTabWidget with two tabs:
+          Tab 0 — "Image View"   : ImageViewerWithMouseTracking (existing viewer)
+          Tab 1 — "Profile View" : CrosshairImageWidget + H/V profile charts
         """
+        from PySide6.QtWidgets import QTabWidget
+        from gui.profile_view import ProfileView
+
+        # ── tab 0: existing image viewer ──────────────────────────────────────
         self._image_viewer = ImageViewerWithMouseTracking()
 
         self._image_viewer.position_changed.connect(self._on_cursor_position_changed)
@@ -1702,7 +1724,16 @@ Max: {stats['hu_max']:8.2f}"""
         self._image_viewer.set_cursor_mode_circle(self._cursor_mode_circle)
         self._image_viewer.set_measurement_mode(self._measurement_mode_enabled)
 
-        return self._image_viewer
+        # ── tab 1: profile view ───────────────────────────────────────────────
+        self._profile_view = ProfileView()
+        self._profile_view.image_index_changed.connect(self.image_index_changed)
+
+        # ── assemble tab widget ───────────────────────────────────────────────
+        tabs = QTabWidget()
+        tabs.addTab(self._image_viewer, "Image View")
+        tabs.addTab(self._profile_view, "Profile View")
+
+        return tabs
 
     def _open_or_update_image_viewer(self, ds: Dataset):
         """Update the image viewer with the current dataset's image."""
@@ -2029,3 +2060,6 @@ Max: {stats['hu_max']:8.2f}"""
             self._image_viewer.set_stats_text("No data loaded")
             self._image_viewer.set_navigation(0, 0)
             self._image_viewer.set_measurement_mode(True)
+
+        if self._profile_view is not None:
+            self._profile_view.clear_image()
