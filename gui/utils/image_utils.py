@@ -465,26 +465,29 @@ def overlay_to_qimage(
         # Threshold: treat any non-zero value as part of overlay
         overlay_binary = overlay_array > 0
         
-        # Position overlay at (origin_x, origin_y), clipping to base image bounds
-        # Calculate the region to copy from overlay and to in base image
-        start_x = origin_x
-        start_y = origin_y
-        
-        # Clipping: ensure we don't go beyond base image bounds
+        # Position overlay at (origin_x, origin_y), clipping to base image bounds.
+        # Handle negative origins: overlay starts before the base image edge.
+        ov_start_x = max(0, -origin_x)
+        ov_start_y = max(0, -origin_y)
+        start_x = max(0, origin_x)
+        start_y = max(0, origin_y)
+
         if start_x >= base_width or start_y >= base_height:
-            # Overlay is completely outside the base image
-            pass
+            pass  # Overlay is completely outside the base image
         else:
-            copy_width = min(overlay_width, base_width - start_x)
-            copy_height = min(overlay_height, base_height - start_y)
-            
+            copy_width  = min(overlay_width  - ov_start_x, base_width  - start_x)
+            copy_height = min(overlay_height - ov_start_y, base_height - start_y)
+
             if copy_width > 0 and copy_height > 0:
-                # Copy the overlapping region
-                overlay_region = overlay_binary[:copy_height, :copy_width]
-                rgba_array[start_y:start_y+copy_height, start_x:start_x+copy_width, 0][overlay_region] = color[0]
-                rgba_array[start_y:start_y+copy_height, start_x:start_x+copy_width, 1][overlay_region] = color[1]
-                rgba_array[start_y:start_y+copy_height, start_x:start_x+copy_width, 2][overlay_region] = color[2]
-                rgba_array[start_y:start_y+copy_height, start_x:start_x+copy_width, 3][overlay_region] = int(opacity * 255)
+                overlay_region = overlay_binary[
+                    ov_start_y:ov_start_y + copy_height,
+                    ov_start_x:ov_start_x + copy_width,
+                ]
+                dst = rgba_array[start_y:start_y + copy_height, start_x:start_x + copy_width]
+                dst[overlay_region, 0] = color[0]
+                dst[overlay_region, 1] = color[1]
+                dst[overlay_region, 2] = color[2]
+                dst[overlay_region, 3] = int(opacity * 255)
         
         # Convert to QImage
         bytes_data = rgba_array.tobytes()

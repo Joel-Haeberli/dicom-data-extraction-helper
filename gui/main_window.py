@@ -364,6 +364,9 @@ class MainWindow(QMainWindow):
             # Update measurements table to reflect current study
             self._update_measurements_table()
             
+            # Build 3D volume in the new tab
+            self._image_tabs.set_series(self._image_files)
+
             # Display the first image
             self._display_dicom_file(self._image_files[0])
             
@@ -420,6 +423,9 @@ class MainWindow(QMainWindow):
         if dicom_file.dataset and dicom_file.is_image:
             # Set dataset on image tabs (handles both image and lazy pixel data loading)
             self._image_tabs.set_dataset(dicom_file.dataset)
+
+            # Sync 3D view slice
+            self._image_tabs.set_current_slice(self._current_image_index)
 
             # Tell the profile view which file is now active
             pv = self._image_tabs.pixel_array_table._profile_view

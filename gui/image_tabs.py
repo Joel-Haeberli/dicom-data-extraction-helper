@@ -6,7 +6,7 @@ Combines image viewer and pixel array table in a tabbed interface.
 Only loads pixel data when the Pixel Data tab is selected.
 """
 
-from typing import Optional
+from typing import List, Optional
 
 from PySide6.QtWidgets import QTabWidget, QWidget, QVBoxLayout
 from PySide6.QtCore import Qt
@@ -38,9 +38,9 @@ class ImageTabs(QTabWidget):
         pixel_layout.setContentsMargins(0, 0, 0, 0)
         pixel_layout.addWidget(self._pixel_array_table, 1)
         
-        # Add tab (only Pixel Data tab remains)
+        # Add tabs
         self.addTab(self._pixel_tab, "Pixel Data")
-        
+
         # State
         self._dataset_pending: Optional = None
     
@@ -86,6 +86,21 @@ class ImageTabs(QTabWidget):
         if hasattr(self._pixel_array_table, '_image_viewer') and self._pixel_array_table._image_viewer is not None:
             self._pixel_array_table._image_viewer.toggle_overlay(show)
     
+    def set_series(self, image_files: List):
+        """Forward the full series to both 3D views."""
+        vv = getattr(self._pixel_array_table, '_volume_view', None)
+        if vv is not None:
+            vv.set_series(image_files)
+        pv = getattr(self._pixel_array_table, '_profile_view', None)
+        if pv is not None:
+            pv.set_series(image_files)
+
+    def set_current_slice(self, index: int):
+        """Forward the current slice index to the 3D view."""
+        vv = getattr(self._pixel_array_table, '_volume_view', None)
+        if vv is not None:
+            vv.set_current_slice(index)
+
     def clear(self):
         """Clear the pixel data tab."""
         self._pixel_array_table.clear()

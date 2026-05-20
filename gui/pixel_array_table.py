@@ -974,6 +974,8 @@ class PixelArrayTable(QWidget):
         self._image_viewer: Optional[ImageViewerWithMouseTracking] = None
         # Profile view (second tab, created alongside the image viewer)
         self._profile_view = None
+        # 3D volume view (third tab, created alongside the image viewer)
+        self._volume_view = None
         
         # Last cursor position for redrawing when size changes
         self._last_cursor_x: int = -1
@@ -1728,10 +1730,16 @@ Max: {stats['hu_max']:8.2f}"""
         self._profile_view = ProfileView()
         self._profile_view.image_index_changed.connect(self.image_index_changed)
 
+        # ── tab 2: 3D volume view ─────────────────────────────────────────────
+        from gui.volume_view import VolumeView
+        self._volume_view = VolumeView()
+        self._volume_view.slice_changed.connect(self.image_index_changed)
+
         # ── assemble tab widget ───────────────────────────────────────────────
         tabs = QTabWidget()
         tabs.addTab(self._image_viewer, "Image View")
         tabs.addTab(self._profile_view, "Profile View")
+        tabs.addTab(self._volume_view, "3D View")
 
         return tabs
 
@@ -2063,3 +2071,6 @@ Max: {stats['hu_max']:8.2f}"""
 
         if self._profile_view is not None:
             self._profile_view.clear_image()
+
+        if self._volume_view is not None:
+            self._volume_view.clear()

@@ -22,9 +22,9 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, QSplitter, QTabWidget,
     QLabel, QPushButton, QSpinBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QSizePolicy, QFileDialog, QColorDialog, QMenu, QCheckBox,
+    QSizePolicy, QFileDialog, QColorDialog, QMenu, QCheckBox, QApplication,
 )
-from PySide6.QtCore import Qt, QPointF, Signal, QDateTime, QSize
+from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QDateTime, QSize
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 from PySide6.QtGui import QPainter, QPen, QBrush, QColor, QPixmap, QImage
 
@@ -250,6 +250,197 @@ class ProfileChartView(QChartView):
         super().leaveEvent(e)
 
 
+# ══════════════════════════════════════════════════════════════ 3-D crosshairs
+
+class ProfileMeasurements3DWidget(QWidget):
+    """
+    MIP volume rendering of the loaded series with measurement positions
+    overlaid as coloured spheres. Coordinates are kept in voxel space
+    (col, row, slice-index); markers are mapped into that space using
+    the stored Z positions.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._vispy_available = False
+        self._scene_module    = None
+        self._canvas          = None
+        self._view            = None
+        self._volume_visual   = None
+        self._crosshair_lines = None   # Line visual for all crosshairs
+
+        # Series metadata stored by set_series()
+        self._n_slices  = 0
+        self._vol_h     = 0
+        self._vol_w     = 0
+        self._vol_min   = 0.0
+        self._vol_max   = 1.0
+        self._z_positions: list = []   # physical Z per slice (same order as volume)
+
+        self._setup_ui()
+        self._try_init_vispy()
+
+    # ── setup ──────────────────────────────────────────────────────────────────
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        ctrl = QHBoxLayout()
+        ctrl.addStretch()
+        self._export_btn = QPushButton("Export 3D…")
+        self._export_btn.setToolTip("Save the 3D view as a PNG image")
+        self._export_btn.setEnabled(False)
+        self._export_btn.clicked.connect(self._on_export_3d)
+        ctrl.addWidget(self._export_btn)
+        layout.addLayout(ctrl)
+
+        self._placeholder = QLabel("Load a DICOM series to see the 3-D volume.")
+        self._placeholder.setAlignment(Qt.AlignCenter)
+        self._placeholder.setStyleSheet("color: #888; font-size: 12px;")
+        layout.addWidget(self._placeholder)
+
+    def _try_init_vispy(self):
+        try:
+            import vispy
+            vispy.use('pyside6')
+            from vispy import scene as _scene
+            self._scene_module = _scene
+            self._vispy_available = True
+            self._init_canvas()
+        except Exception:
+            self._vispy_available = False
+
+    def _init_canvas(self):
+        scene = self._scene_module
+        self._canvas = scene.SceneCanvas(keys='interactive', show=False, bgcolor='black')
+        native = self._canvas.native
+        self._placeholder.hide()
+        self.layout().addWidget(native)
+
+        self._view = self._canvas.central_widget.add_view()
+        self._view.camera = scene.cameras.TurntableCamera(fov=45, elevation=30, azimuth=45)
+
+        self._crosshair_lines = scene.visuals.Line(
+            parent=self._view.scene, connect='segments', width=2,
+        )
+        self._crosshair_lines.visible = False
+        self._export_btn.setEnabled(True)
+
+    # ── public API ─────────────────────────────────────────────────────────────
+
+    def set_series(self, image_files: list):
+        """Build (or rebuild) the MIP volume from the series."""
+        if not self._vispy_available or self._canvas is None:
+            return
+
+        arrays, z_pos = [], []
+        for f in image_files:
+            if f.dataset is None:
+                continue
+            try:
+                arr = f.dataset.pixel_array
+                if arr.ndim == 3:
+                    arr = arr[0]
+                arrays.append(arr.astype(np.float32))
+                z_pos.append(f.image_coordinates.get('z', 0.0))
+            except Exception:
+                continue
+
+        if not arrays:
+            return
+
+        volume = np.stack(arrays, axis=0)   # (n, H, W)
+        self._n_slices, self._vol_h, self._vol_w = volume.shape
+        self._z_positions = z_pos
+        self._vol_min = float(volume.min())
+        self._vol_max = float(volume.max()) if volume.max() != volume.min() else self._vol_min + 1.0
+
+        vol_norm = ((volume - self._vol_min) / (self._vol_max - self._vol_min)).astype(np.float32)
+
+        scene = self._scene_module
+        n, h, w = volume.shape
+
+        # Remove old visuals if any
+        if self._volume_visual is not None:
+            self._volume_visual.parent = None
+            self._volume_visual = None
+        if self._crosshair_lines is not None:
+            self._crosshair_lines.visible = False
+
+        self._volume_visual = scene.visuals.Volume(
+            vol_norm, parent=self._view.scene, method='mip', clim=(0.0, 1.0),
+        )
+        self._volume_visual.transform = scene.transforms.STTransform(
+            translate=(-w / 2, -h / 2, -n / 2)
+        )
+
+        diag = float(np.sqrt(w ** 2 + h ** 2 + n ** 2))
+        self._view.camera.distance = diag * 0.85
+
+        self._canvas.update()
+
+    def update_measurements(self, measurements: list):
+        """Draw a crosshair on each measurement's slice plane in the volume."""
+        if not self._vispy_available or self._crosshair_lines is None:
+            return
+        if not self._z_positions:
+            return
+
+        z_arr = np.array(self._z_positions, dtype=np.float64)
+        n, h, w = self._n_slices, self._vol_h, self._vol_w
+
+        # Each measurement contributes 2 line segments (H + V), each needing
+        # 2 vertices → 4 vertices per measurement.
+        # connect='segments' pairs consecutive vertices: [0-1], [2-3], …
+        verts, colors = [], []
+        for m in measurements:
+            z_mm = m.get('z')
+            if z_mm is None:
+                continue
+            z_idx = int(np.argmin(np.abs(z_arr - float(z_mm))))
+            x  = float(m['x']) - w / 2
+            y  = float(m['y']) - h / 2
+            z  = float(z_idx)  - n / 2
+            c  = QColor(m['color'])
+            rgba = (c.redF(), c.greenF(), c.blueF(), 1.0)
+
+            # Horizontal line (full width at this y, z)
+            verts += [[-w / 2, y, z], [w / 2, y, z]]
+            # Vertical line (full height at this x, z)
+            verts += [[x, -h / 2, z], [x, h / 2, z]]
+            # Z-axis line (full depth at this x, y)
+            verts += [[x, y, -n / 2], [x, y, n / 2]]
+            colors += [rgba, rgba, rgba, rgba, rgba, rgba]
+
+        if not verts:
+            self._crosshair_lines.visible = False
+            self._canvas.update()
+            return
+
+        self._crosshair_lines.set_data(
+            pos=np.array(verts,  dtype=np.float32),
+            color=np.array(colors, dtype=np.float32),
+        )
+        self._crosshair_lines.visible = True
+        self._canvas.update()
+
+    def _on_export_3d(self):
+        if self._canvas is None:
+            return
+        ts = QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export 3D View", f"3d_crosshairs_{ts}.png", "PNG Files (*.png)")
+        if not path:
+            return
+        native = self._canvas.native
+        dpr = native.devicePixelRatio()
+        pm = native.grab()
+        pm.setDevicePixelRatio(dpr)
+        pm.save(path, "PNG")
+
+
 # ══════════════════════════════════════════════════════════════ profile view
 
 class ProfileView(QWidget):
@@ -278,13 +469,17 @@ class ProfileView(QWidget):
         self._chunk_factor: int = 1
         self._light_mode: bool = False
         self._show_all_meas: bool = False
+        self._3d_tab_active: bool = False
         self._current_path: Optional[str] = None   # path of the image currently displayed
 
         self._measurements: List[Dict[str, Any]] = []
         self._next_id: int = 1
-        # id → (h_px, h_mm, v_px, v_mm)
-        self._series_map: Dict[int, Tuple[QLineSeries, QLineSeries,
-                                          QLineSeries, QLineSeries]] = {}
+        # id → (h_px, h_mm, v_px, v_mm, z_px, z_mm)
+        self._series_map: Dict[int, Tuple] = {}
+
+        self._image_files: list = []          # full series for Z profile
+        self._z_mm_positions: list = []       # physical Z (mm) per slice
+        self._chart_maximized: Optional[int] = None  # 0=H, 1=V, 2=Z, None=normal
 
         self._setup_ui()
 
@@ -329,7 +524,13 @@ class ProfileView(QWidget):
         img_grid.setColumnStretch(1, 1)
         img_grid.setRowStretch(1, 1)
 
-        h_split.addWidget(img_container)
+        self._profile_3d = ProfileMeasurements3DWidget()
+        self._img_area_tabs = QTabWidget()
+        self._img_area_tabs.addTab(img_container,    "2D")
+        self._img_area_tabs.addTab(self._profile_3d, "3D")
+        self._img_area_tabs.currentChanged.connect(self._on_img_area_tab_changed)
+
+        h_split.addWidget(self._img_area_tabs)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -402,8 +603,42 @@ class ProfileView(QWidget):
         self._v_cv_mm.chart_hover_left.connect(
             lambda: self._img.set_hover_row(None))
 
-        v_split.addWidget(self._h_chart_tabs)
-        v_split.addWidget(self._v_chart_tabs)
+        # — Z profile (slice index + physical Z mm) ——————————————————————————
+        (self._zc_px, self._zc_ax_px, self._zc_ay_px) = self._make_chart(
+            "Z Profile", "Slice", "Value")
+        self._z_live_px = self._attach_series(
+            self._zc_px, self._zc_ax_px, self._zc_ay_px,
+            "live", QColor(0, 210, 210), width=2)
+
+        (self._zc_mm, self._zc_ax_mm, self._zc_ay_mm) = self._make_chart(
+            "Z Profile", "Z (mm)", "Value")
+        self._z_live_mm = self._attach_series(
+            self._zc_mm, self._zc_ax_mm, self._zc_ay_mm,
+            "live", QColor(0, 210, 210), width=2)
+
+        self._z_cv_px = ProfileChartView(self._zc_px)
+        self._z_cv_mm = ProfileChartView(self._zc_mm)
+        self._z_stats_px, z_tab_px = self._make_chart_tab(self._z_cv_px)
+        self._z_stats_mm, z_tab_mm = self._make_chart_tab(self._z_cv_mm)
+        self._z_chart_tabs = QTabWidget()
+        self._z_chart_tabs.addTab(z_tab_px, "px")
+        self._z_chart_tabs.addTab(z_tab_mm, "mm")
+        self._z_chart_tabs.setMinimumHeight(120)
+
+        self._chart_v_split = v_split
+        self._chart_max_btns: List[QPushButton] = []
+        for idx, tabs in enumerate((self._h_chart_tabs,
+                                     self._v_chart_tabs,
+                                     self._z_chart_tabs)):
+            btn = QPushButton("⤢")
+            btn.setFixedSize(22, 22)
+            btn.setFlat(True)
+            btn.setToolTip("Maximize / restore this chart")
+            btn.clicked.connect(lambda _=None, i=idx: self._toggle_maximize_chart(i))
+            tabs.setCornerWidget(btn, Qt.TopRightCorner)
+            self._chart_max_btns.append(btn)
+            v_split.addWidget(tabs)
+
         right_layout.addWidget(v_split, 1)
         h_split.addWidget(right)
         h_split.setSizes([420, 380])
@@ -480,7 +715,7 @@ class ProfileView(QWidget):
         charts_menu.addAction("Export Image",
                                self._on_export_image)
         charts_menu.addSeparator()
-        charts_menu.addAction("Export Charts Separate (2 files)",
+        charts_menu.addAction("Export Charts Separate (3 files)",
                                self._on_export_charts_separate)
         charts_menu.addAction("Export Charts Side-by-Side (1 file)",
                                self._on_export_charts_sidebyside)
@@ -611,6 +846,28 @@ class ProfileView(QWidget):
             return None
         return [i * self._pixel_spacing[0] for i in range(n)]
 
+    def _z_profile(self, x: int, y: int) -> List[float]:
+        """Pixel values at (x, y) across all slices (HU-converted)."""
+        result = []
+        for f in self._image_files:
+            if f.dataset is None:
+                result.append(0.0)
+                continue
+            try:
+                arr = f.dataset.pixel_array
+                if arr.ndim == 3:
+                    arr = arr[0]
+                result.append(float(arr[y, x]) * self._slope + self._intercept)
+            except Exception:
+                result.append(0.0)
+        return result
+
+    def _z_x_mm(self) -> Optional[List[float]]:
+        """Physical Z positions in mm for each slice (None if unavailable)."""
+        if not self._z_mm_positions or any(v is None for v in self._z_mm_positions):
+            return None
+        return [float(v) for v in self._z_mm_positions]
+
     @staticmethod
     def _apply_chunk(y_vals: List[float],
                      x_vals: Optional[List[float]],
@@ -735,13 +992,34 @@ class ProfileView(QWidget):
             stats_style = ("color:#aaaaaa; font-size:10px; padding:2px 4px;"
                            "background:#111111; border-top:1px solid #333;")
         for lbl in (self._h_stats_px, self._h_stats_mm,
-                    self._v_stats_px, self._v_stats_mm):
+                    self._v_stats_px, self._v_stats_mm,
+                    self._z_stats_px, self._z_stats_mm):
             lbl.setStyleSheet(stats_style)
+
+    def _toggle_maximize_chart(self, idx: int):
+        if self._chart_maximized == idx:
+            # Restore equal sizes
+            self._chart_maximized = None
+            n = self._chart_v_split.count()
+            total = max(self._chart_v_split.height(), n * 120)
+            self._chart_v_split.setSizes([total // n] * n)
+        else:
+            self._chart_maximized = idx
+            n = self._chart_v_split.count()
+            sizes = [0] * n
+            sizes[idx] = self._chart_v_split.height()
+            self._chart_v_split.setSizes(sizes)
+        self._update_maximize_buttons()
+
+    def _update_maximize_buttons(self):
+        for i, btn in enumerate(self._chart_max_btns):
+            btn.setText("⤡" if self._chart_maximized == i else "⤢")
 
     def _on_all_meas_toggled(self, show_all: bool):
         self._show_all_meas = show_all
         self._rerender_all_saved_series()
         self._refresh_live()
+        self._sync_3d()
 
     def _on_theme_toggled(self, light: bool):
         self._light_mode = light
@@ -749,10 +1027,18 @@ class ProfileView(QWidget):
 
     def _on_show_meas_toggled(self, show: bool):
         self._update_image_crosshairs()
+        self._sync_3d()
+
+    def _on_img_area_tab_changed(self, index: int):
+        self._3d_tab_active = (index == 1)
+        self._rerender_all_saved_series()
+        self._refresh_live()
 
     def _is_meas_visible(self, meas: Dict) -> bool:
-        """True if this measurement should appear in the charts."""
-        if self._show_all_meas:
+        """True if this measurement should appear in charts and the 3D view."""
+        if not self._show_meas_check.isChecked():
+            return False
+        if self._show_all_meas or self._3d_tab_active:
             return True
         mp = meas.get("image_path")
         return not mp or mp == self._current_path
@@ -832,11 +1118,33 @@ class ProfileView(QWidget):
         self._fit_y_axis(self._hc_ay_mm, hp_mm, *saved_h)
         self._fit_y_axis(self._vc_ay_mm, vp_mm, *saved_v)
 
+        # — Z profile —
+        zp_raw = self._z_profile(x, y)
+        zp, _ = self._apply_chunk(zp_raw, None, cf)
+        self._fill(self._z_live_px, zp)
+        if zp:
+            self._zc_ax_px.setRange(0, len(zp) - 1)
+            self._zc_ay_px.setTitleText(y_label)
+
+        z_xmm = self._z_x_mm()
+        zp_mm, z_xmm_c = self._apply_chunk(zp_raw, z_xmm, cf)
+        self._fill(self._z_live_mm, zp_mm, z_xmm_c)
+        if z_xmm_c:
+            self._fit_x_axis(self._zc_ax_mm, z_xmm_c)
+            self._zc_ay_mm.setTitleText(y_label)
+
+        saved_z = [m.get("z_profile", []) for m in self._measurements
+                   if self._is_meas_visible(m)]
+        self._fit_y_axis(self._zc_ay_px, zp, *saved_z)
+        self._fit_y_axis(self._zc_ay_mm, zp_mm, *saved_z)
+
         # — stats bars (live, post-range, post-chunk) —
         self._update_stats(self._h_stats_px, hp)
         self._update_stats(self._h_stats_mm, hp_mm)
         self._update_stats(self._v_stats_px, vp)
         self._update_stats(self._v_stats_mm, vp_mm)
+        self._update_stats(self._z_stats_px, zp)
+        self._update_stats(self._z_stats_mm, zp_mm)
 
     def _rerender_all_saved_series(self):
         """Refill every saved series — called when chunk factor or range changes."""
@@ -850,15 +1158,19 @@ class ProfileView(QWidget):
             mid = meas["id"]
             if mid not in self._series_map:
                 continue
-            h_px, h_mm, v_px, v_mm = self._series_map[mid]
+            h_px, h_mm, v_px, v_mm, z_px, z_mm = self._series_map[mid]
 
             if not self._is_meas_visible(meas):
-                for s in (h_px, h_mm, v_px, v_mm):
-                    s.clear()
+                for s in (h_px, h_mm, v_px, v_mm, z_px, z_mm):
+                    s.setVisible(False)
                 continue
+
+            for s in (h_px, h_mm, v_px, v_mm, z_px, z_mm):
+                s.setVisible(True)
 
             hp_raw = meas["h_profile"]
             vp_raw = meas["v_profile"]
+            zp_raw = meas.get("z_profile", [])
             ps = meas.get("pixel_spacing")
 
             hp_r, h_xi = self._apply_range(hp_raw, h_from, h_to)
@@ -871,6 +1183,9 @@ class ProfileView(QWidget):
             self._fill(h_px, hp, h_xi_c)
             self._fill(v_px, vp, v_xi_c)
 
+            zp, _ = self._apply_chunk(zp_raw, None, cf)
+            self._fill(z_px, zp)
+
             if ps and len(ps) >= 2 and h_xi and v_xi:
                 h_xmm_r = [i * ps[1] for i in h_xi]
                 v_xmm_r = [i * ps[0] for i in v_xi]
@@ -879,10 +1194,26 @@ class ProfileView(QWidget):
                 self._fill(h_mm, hp_mm_v, h_xmm)
                 self._fill(v_mm, vp_mm_v, v_xmm)
             else:
-                h_mm.clear()
-                v_mm.clear()
+                h_mm.setVisible(False)
+                v_mm.setVisible(False)
+
+            z_xmm_raw = meas.get("z_x_mm")
+            if z_xmm_raw:
+                zp_mm_v, z_xmm = self._apply_chunk(zp_raw, z_xmm_raw, cf)
+                self._fill(z_mm, zp_mm_v, z_xmm)
+            else:
+                z_mm.setVisible(False)
 
     # ══════════════════════════════════════════════════════ public API
+
+    def set_series(self, image_files: list):
+        """Store the series for Z profiling and pass it to the 3-D tab."""
+        self._image_files    = image_files
+        self._z_mm_positions = [f.image_coordinates.get('z', None)
+                                 for f in image_files]
+        self._profile_3d.set_series(image_files)
+        self._sync_3d()
+        self._refresh_live()
 
     def set_dataset(self, ds, slope: float = 1.0, intercept: float = 0.0):
         if ds is None:
@@ -954,7 +1285,7 @@ class ProfileView(QWidget):
     def set_image_path(self, path: Optional[str]):
         self._current_path = path
         self._update_image_crosshairs()
-        if not self._show_all_meas:
+        if not self._show_all_meas and not self._3d_tab_active:
             self._rerender_all_saved_series()
             self._refresh_live()
 
@@ -1086,6 +1417,8 @@ class ProfileView(QWidget):
             "color": color.name(),
             "h_profile": hp,
             "v_profile": vp,
+            "z_profile": self._z_profile(x, y),
+            "z_x_mm":    self._z_x_mm(),
             "kvp": self._kvp,
             "z": self._z,
             "pixel_spacing": list(self._pixel_spacing) if self._pixel_spacing else None,
@@ -1096,6 +1429,7 @@ class ProfileView(QWidget):
         self._add_table_row(meas)
         self._update_image_crosshairs()
         self._refresh_live()
+        self._sync_3d()
 
     def _add_series_for(self, meas: Dict):
         mid = meas["id"]
@@ -1110,11 +1444,17 @@ class ProfileView(QWidget):
         h_mm = self._attach_series(self._hc_mm, self._hc_ax_mm, self._hc_ay_mm, label, color)
         v_px = self._attach_series(self._vc_px, self._vc_ax_px, self._vc_ay_px, label, color)
         v_mm = self._attach_series(self._vc_mm, self._vc_ax_mm, self._vc_ay_mm, label, color)
+        z_px = self._attach_series(self._zc_px, self._zc_ax_px, self._zc_ay_px, label, color)
+        z_mm = self._attach_series(self._zc_mm, self._zc_ax_mm, self._zc_ay_mm, label, color)
 
         hp, _ = self._apply_chunk(hp_raw, None, cf)
         vp, _ = self._apply_chunk(vp_raw, None, cf)
         self._fill(h_px, hp)
         self._fill(v_px, vp)
+
+        zp_raw = meas.get("z_profile", [])
+        zp, _ = self._apply_chunk(zp_raw, None, cf)
+        self._fill(z_px, zp)
 
         if ps and len(ps) >= 2:
             h_xmm_raw = [i * ps[1] for i in range(len(hp_raw))]
@@ -1124,7 +1464,12 @@ class ProfileView(QWidget):
             self._fill(h_mm, hp_mm, h_xmm)
             self._fill(v_mm, vp_mm, v_xmm)
 
-        self._series_map[mid] = (h_px, h_mm, v_px, v_mm)
+        z_xmm_raw = meas.get("z_x_mm")
+        if z_xmm_raw:
+            zp_mm, z_xmm = self._apply_chunk(zp_raw, z_xmm_raw, cf)
+            self._fill(z_mm, zp_mm, z_xmm)
+
+        self._series_map[mid] = (h_px, h_mm, v_px, v_mm, z_px, z_mm)
 
     def _add_table_row(self, meas: Dict):
         row = self._table.rowCount()
@@ -1193,31 +1538,43 @@ class ProfileView(QWidget):
         self._rebuild_table()
         self._refresh_live()
 
+    def _sync_3d(self):
+        show = self._show_meas_check.isChecked()
+        visible = self._measurements if show else []
+        self._profile_3d.update_measurements(visible)
+
     def _rebuild_table(self):
         self._table.setRowCount(0)
         for meas in self._measurements:
             self._add_table_row(meas)
         self._update_image_crosshairs()
+        self._sync_3d()
 
     # ══════════════════════════════════════════════════════ chart export
 
-    def _active_chart_views(self) -> Tuple[QChartView, QChartView]:
-        """Return the currently visible (H, V) chart views."""
-        h_idx = self._h_chart_tabs.currentIndex()
-        v_idx = self._v_chart_tabs.currentIndex()
-        h_cv = self._h_cv_px if h_idx == 0 else self._h_cv_mm
-        v_cv = self._v_cv_px if v_idx == 0 else self._v_cv_mm
-        return h_cv, v_cv
+    def _active_chart_views(self) -> Tuple[QChartView, QChartView, QChartView]:
+        """Return the currently visible (H, V, Z) chart views."""
+        h_cv = self._h_cv_px if self._h_chart_tabs.currentIndex() == 0 else self._h_cv_mm
+        v_cv = self._v_cv_px if self._v_chart_tabs.currentIndex() == 0 else self._v_cv_mm
+        z_cv = self._z_cv_px if self._z_chart_tabs.currentIndex() == 0 else self._z_cv_mm
+        return h_cv, v_cv, z_cv
 
     @staticmethod
-    def _grab_chart(cv: QChartView, fallback_size: QSize = QSize(800, 400)) -> QPixmap:
+    def _grab_chart(cv: QChartView) -> QPixmap:
+        """Export the chart at 1800×700 by temporarily resizing the widget.
+
+        Resizing forces Qt Charts to recompute the full layout (axis ticks,
+        label positions, plot area) for the target size before grabbing.
+        """
+        w, h = 1800, 700
+        orig_size = cv.size()
+        cv.resize(w, h)
+        cv.chart().layout().invalidate()
+        QApplication.processEvents()
         pm = cv.grab()
-        if pm.isNull() or pm.width() < 10:
-            pm = QPixmap(fallback_size)
-            pm.fill(Qt.black)
-            p = QPainter(pm)
-            cv.render(p)
-            p.end()
+        cv.resize(orig_size)
+        cv.chart().layout().invalidate()
+        QApplication.processEvents()
         return pm
 
     def _on_export_image(self):
@@ -1235,9 +1592,16 @@ class ProfileView(QWidget):
             self, "Export Charts (Separate) — Choose Directory")
         if not dir_path:
             return
-        h_cv, v_cv = self._active_chart_views()
-        self._grab_chart(h_cv).save(f"{dir_path}/h_profile_{ts}.png", "PNG")
-        self._grab_chart(v_cv).save(f"{dir_path}/v_profile_{ts}.png", "PNG")
+        pairs = [
+            (self._h_cv_px, "h_profile_px"),
+            (self._h_cv_mm, "h_profile_mm"),
+            (self._v_cv_px, "v_profile_px"),
+            (self._v_cv_mm, "v_profile_mm"),
+            (self._z_cv_px, "z_profile_px"),
+            (self._z_cv_mm, "z_profile_mm"),
+        ]
+        for cv, name in pairs:
+            self._grab_chart(cv).save(f"{dir_path}/{name}_{ts}.png", "PNG")
 
     def _on_export_charts_sidebyside(self):
         ts = QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss")
@@ -1246,16 +1610,24 @@ class ProfileView(QWidget):
             f"profiles_{ts}.png", "PNG Files (*.png)")
         if not path:
             return
-        h_cv, v_cv = self._active_chart_views()
-        h_img = self._grab_chart(h_cv).toImage()
-        v_img = self._grab_chart(v_cv).toImage()
-        combined = QImage(h_img.width() + v_img.width(),
-                          max(h_img.height(), v_img.height()),
-                          QImage.Format_ARGB32)
+        # Two rows: top = px charts, bottom = mm charts
+        px_views = (self._h_cv_px, self._v_cv_px, self._z_cv_px)
+        mm_views = (self._h_cv_mm, self._v_cv_mm, self._z_cv_mm)
+        px_imgs = [self._grab_chart(cv).toImage() for cv in px_views]
+        mm_imgs = [self._grab_chart(cv).toImage() for cv in mm_views]
+        row_w = sum(i.width() for i in px_imgs)
+        row_h = max(i.height() for i in px_imgs)
+        combined = QImage(row_w, row_h * 2, QImage.Format_ARGB32)
         combined.fill(Qt.black)
         p = QPainter(combined)
-        p.drawImage(0, 0, h_img)
-        p.drawImage(h_img.width(), 0, v_img)
+        x = 0
+        for img in px_imgs:
+            p.drawImage(x, 0, img)
+            x += img.width()
+        x = 0
+        for img in mm_imgs:
+            p.drawImage(x, row_h, img)
+            x += img.width()
         p.end()
         combined.save(path, "PNG")
 
@@ -1319,3 +1691,4 @@ class ProfileView(QWidget):
         self._update_image_crosshairs()
         self._rerender_all_saved_series()
         self._refresh_live()
+        self._sync_3d()
