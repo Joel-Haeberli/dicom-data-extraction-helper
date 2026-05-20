@@ -1,9 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+#
+# Build requirements: all packages in ../requirements.txt must be installed
+# in the Python / venv that PyInstaller uses.
+#   pip install -r ../requirements.txt
+#
+from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
+import importlib.util, sys
+
+# Abort early with a clear message if vispy is not installed in this environment
+if importlib.util.find_spec('vispy') is None:
+    sys.exit(
+        '\n\nERROR: vispy is not installed in the current Python environment.\n'
+        'Run:  pip install -r ../requirements.txt\n'
+        'then re-run PyInstaller.\n'
+    )
 
 block_cipher = None
 
-# Collect everything vispy needs (shaders, backends, all submodules)
 vispy_datas, vispy_binaries, vispy_hidden = collect_all('vispy')
 
 a = Analysis(
@@ -32,19 +45,15 @@ a = Analysis(
         'pydicom.dataset',
         'pydicom.tag',
         'pydicom.uid',
-        'pydicom.encoders',
-        'pydicom.encoders.gdcm',
-        'pydicom.encoders.pylibjpeg',
         # numpy
         'numpy',
         'numpy.core',
         'numpy.core._multiarray_umath',
-        'numpy.core._multiarray_tests',
         # encodings
         'encodings.ascii',
         'encodings.latin_1',
         'encodings.utf_8',
-        # vispy — explicit backend + OpenGL path
+        # vispy — explicit backend + GL paths
         'vispy',
         'vispy.app',
         'vispy.app.backends',
@@ -68,7 +77,7 @@ a = Analysis(
         'vispy.color',
         'vispy.geometry',
         'vispy.glsl',
-        # OpenGL (needed by vispy on Windows)
+        # PyOpenGL (vispy GL fallback on Windows)
         'OpenGL',
         'OpenGL.GL',
         'OpenGL.platform',
