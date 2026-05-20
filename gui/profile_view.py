@@ -335,8 +335,9 @@ class ProfileMeasurements3DWidget(QWidget):
             self._scene_module = _scene
             self._vispy_available = True
             self._init_canvas()
-        except Exception:
+        except Exception as e:
             self._vispy_available = False
+            self._placeholder.setText(f"3D view unavailable:\n{type(e).__name__}: {e}")
 
     def _init_canvas(self):
         scene = self._scene_module

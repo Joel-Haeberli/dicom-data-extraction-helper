@@ -407,8 +407,9 @@ class VolumeView(QWidget):
             self._scene_module = _scene
             self._vispy_available = True
             self._vispy_placeholder.setText("Load a DICOM series to render the 3D volume.")
-        except Exception:
+        except Exception as e:
             self._vispy_available = False
+            self._vispy_placeholder.setText(f"3D view unavailable:\n{type(e).__name__}: {e}")
 
     # ══════════════════════════════════════════════════════════ public API ════
 
