@@ -276,6 +276,13 @@ class ProfileMeasurements3DWidget(QWidget):
         self._vol_min   = 0.0
         self._vol_max   = 1.0
         self._z_positions: list = []   # physical Z per slice (same order as volume)
+        self._last_measurements: list = []   # cached for flip rebuilds
+        self._vol_cache: Optional[np.ndarray] = None   # raw volume for flip rebuilds
+
+        # orientation flips
+        self._orient_flip_x: bool = False
+        self._orient_flip_y: bool = False
+        self._orient_flip_z: bool = False
 
         self._setup_ui()
         self._try_init_vispy()
@@ -288,6 +295,25 @@ class ProfileMeasurements3DWidget(QWidget):
         layout.setSpacing(4)
 
         ctrl = QHBoxLayout()
+        ctrl.addWidget(QLabel("Flip:"))
+        self._flip_x_btn = QPushButton("L/R")
+        self._flip_x_btn.setCheckable(True)
+        self._flip_x_btn.setFixedWidth(38)
+        self._flip_x_btn.setToolTip("Flip left/right")
+        self._flip_x_btn.toggled.connect(self._on_orient_flip_changed)
+        ctrl.addWidget(self._flip_x_btn)
+        self._flip_y_btn = QPushButton("A/P")
+        self._flip_y_btn.setCheckable(True)
+        self._flip_y_btn.setFixedWidth(38)
+        self._flip_y_btn.setToolTip("Flip anterior/posterior (rows)")
+        self._flip_y_btn.toggled.connect(self._on_orient_flip_changed)
+        ctrl.addWidget(self._flip_y_btn)
+        self._flip_z_btn = QPushButton("S/I")
+        self._flip_z_btn.setCheckable(True)
+        self._flip_z_btn.setFixedWidth(38)
+        self._flip_z_btn.setToolTip("Flip superior/inferior (slices)")
+        self._flip_z_btn.toggled.connect(self._on_orient_flip_changed)
+        ctrl.addWidget(self._flip_z_btn)
         ctrl.addStretch()
         self._export_btn = QPushButton("Export 3D…")
         self._export_btn.setToolTip("Save the 3D view as a PNG image")
@@ -328,6 +354,43 @@ class ProfileMeasurements3DWidget(QWidget):
         self._crosshair_lines.visible = False
         self._export_btn.setEnabled(True)
 
+    # ── orientation helpers ────────────────────────────────────────────────────
+
+    def _prepare_vol_display(self, vol_norm: np.ndarray) -> np.ndarray:
+        vol = vol_norm
+        if self._orient_flip_x:
+            vol = np.flip(vol, axis=2)
+        if self._orient_flip_y:
+            vol = np.flip(vol, axis=1)
+        if self._orient_flip_z:
+            vol = np.flip(vol, axis=0)
+        return np.ascontiguousarray(vol)
+
+    def _voxel_to_world(self, cx: float, cy: float, cz: float):
+        n, h, w = self._n_slices, self._vol_h, self._vol_w
+        ix, iy, iz = cx, cy, cz
+        if self._orient_flip_x:
+            ix = (w - 1) - ix
+        if self._orient_flip_y:
+            iy = (h - 1) - iy
+        if self._orient_flip_z:
+            iz = (n - 1) - iz
+        return (ix - w / 2, iy - h / 2, iz - n / 2)
+
+    def _on_orient_flip_changed(self):
+        self._orient_flip_x = self._flip_x_btn.isChecked()
+        self._orient_flip_y = self._flip_y_btn.isChecked()
+        self._orient_flip_z = self._flip_z_btn.isChecked()
+        if self._volume_visual is None or self._vol_cache is None:
+            return
+        vol_norm = ((self._vol_cache - self._vol_min) /
+                    (self._vol_max - self._vol_min)).astype(np.float32)
+        self._volume_visual.set_data(self._prepare_vol_display(vol_norm))
+        if self._last_measurements:
+            self.update_measurements(self._last_measurements)
+        if self._canvas is not None:
+            self._canvas.update()
+
     # ── public API ─────────────────────────────────────────────────────────────
 
     def set_series(self, image_files: list):
@@ -356,6 +419,7 @@ class ProfileMeasurements3DWidget(QWidget):
         self._z_positions = z_pos
         self._vol_min = float(volume.min())
         self._vol_max = float(volume.max()) if volume.max() != volume.min() else self._vol_min + 1.0
+        self._vol_cache = volume   # keep raw for flip rebuilds
 
         vol_norm = ((volume - self._vol_min) / (self._vol_max - self._vol_min)).astype(np.float32)
 
@@ -370,7 +434,8 @@ class ProfileMeasurements3DWidget(QWidget):
             self._crosshair_lines.visible = False
 
         self._volume_visual = scene.visuals.Volume(
-            vol_norm, parent=self._view.scene, method='mip', clim=(0.0, 1.0),
+            self._prepare_vol_display(vol_norm),
+            parent=self._view.scene, method='mip', clim=(0.0, 1.0),
         )
         self._volume_visual.transform = scene.transforms.STTransform(
             translate=(-w / 2, -h / 2, -n / 2)
@@ -383,6 +448,7 @@ class ProfileMeasurements3DWidget(QWidget):
 
     def update_measurements(self, measurements: list):
         """Draw a crosshair on each measurement's slice plane in the volume."""
+        self._last_measurements = measurements
         if not self._vispy_available or self._crosshair_lines is None:
             return
         if not self._z_positions:
@@ -391,18 +457,13 @@ class ProfileMeasurements3DWidget(QWidget):
         z_arr = np.array(self._z_positions, dtype=np.float64)
         n, h, w = self._n_slices, self._vol_h, self._vol_w
 
-        # Each measurement contributes 2 line segments (H + V), each needing
-        # 2 vertices → 4 vertices per measurement.
-        # connect='segments' pairs consecutive vertices: [0-1], [2-3], …
         verts, colors = [], []
         for m in measurements:
             z_mm = m.get('z')
             if z_mm is None:
                 continue
             z_idx = int(np.argmin(np.abs(z_arr - float(z_mm))))
-            x  = float(m['x']) - w / 2
-            y  = float(m['y']) - h / 2
-            z  = float(z_idx)  - n / 2
+            x, y, z = self._voxel_to_world(float(m['x']), float(m['y']), float(z_idx))
             c  = QColor(m['color'])
             rgba = (c.redF(), c.greenF(), c.blueF(), 1.0)
 
@@ -719,6 +780,9 @@ class ProfileView(QWidget):
                                self._on_export_charts_separate)
         charts_menu.addAction("Export Charts Side-by-Side (1 file)",
                                self._on_export_charts_sidebyside)
+        charts_menu.addSeparator()
+        charts_menu.addAction("Export Selected Measurement CSV…",
+                               self._on_export_measurement_csv)
         self._export_charts_btn.setMenu(charts_menu)
         ctrl.addWidget(self._export_charts_btn)
 
@@ -1440,6 +1504,11 @@ class ProfileView(QWidget):
         ps = meas.get("pixel_spacing")
         cf = self._chunk_factor
 
+        h_from = self._h_slider.low
+        h_to   = self._h_slider.high
+        v_from = self._v_slider.low
+        v_to   = self._v_slider.high
+
         h_px = self._attach_series(self._hc_px, self._hc_ax_px, self._hc_ay_px, label, color)
         h_mm = self._attach_series(self._hc_mm, self._hc_ax_mm, self._hc_ay_mm, label, color)
         v_px = self._attach_series(self._vc_px, self._vc_ax_px, self._vc_ay_px, label, color)
@@ -1447,27 +1516,37 @@ class ProfileView(QWidget):
         z_px = self._attach_series(self._zc_px, self._zc_ax_px, self._zc_ay_px, label, color)
         z_mm = self._attach_series(self._zc_mm, self._zc_ax_mm, self._zc_ay_mm, label, color)
 
-        hp, _ = self._apply_chunk(hp_raw, None, cf)
-        vp, _ = self._apply_chunk(vp_raw, None, cf)
-        self._fill(h_px, hp)
-        self._fill(v_px, vp)
+        # Apply range then chunk with actual pixel-index x coords (same as _rerender_all_saved_series)
+        hp_r, h_xi = self._apply_range(hp_raw, h_from, h_to)
+        vp_r, v_xi = self._apply_range(vp_raw, v_from, v_to)
+        h_xi_f = [float(i) for i in h_xi]
+        v_xi_f = [float(i) for i in v_xi]
+        hp, h_xi_c = self._apply_chunk(hp_r, h_xi_f, cf)
+        vp, v_xi_c = self._apply_chunk(vp_r, v_xi_f, cf)
+        self._fill(h_px, hp, h_xi_c)
+        self._fill(v_px, vp, v_xi_c)
 
         zp_raw = meas.get("z_profile", [])
         zp, _ = self._apply_chunk(zp_raw, None, cf)
         self._fill(z_px, zp)
 
-        if ps and len(ps) >= 2:
-            h_xmm_raw = [i * ps[1] for i in range(len(hp_raw))]
-            v_xmm_raw = [i * ps[0] for i in range(len(vp_raw))]
-            hp_mm, h_xmm = self._apply_chunk(hp_raw, h_xmm_raw, cf)
-            vp_mm, v_xmm = self._apply_chunk(vp_raw, v_xmm_raw, cf)
+        if ps and len(ps) >= 2 and h_xi and v_xi:
+            h_xmm_r = [i * ps[1] for i in h_xi]
+            v_xmm_r = [i * ps[0] for i in v_xi]
+            hp_mm, h_xmm = self._apply_chunk(hp_r, h_xmm_r, cf)
+            vp_mm, v_xmm = self._apply_chunk(vp_r, v_xmm_r, cf)
             self._fill(h_mm, hp_mm, h_xmm)
             self._fill(v_mm, vp_mm, v_xmm)
+        else:
+            h_mm.setVisible(False)
+            v_mm.setVisible(False)
 
         z_xmm_raw = meas.get("z_x_mm")
         if z_xmm_raw:
             zp_mm, z_xmm = self._apply_chunk(zp_raw, z_xmm_raw, cf)
             self._fill(z_mm, zp_mm, z_xmm)
+        else:
+            z_mm.setVisible(False)
 
         self._series_map[mid] = (h_px, h_mm, v_px, v_mm, z_px, z_mm)
 
@@ -1630,6 +1709,66 @@ class ProfileView(QWidget):
             x += img.width()
         p.end()
         combined.save(path, "PNG")
+
+    # ══════════════════════════════════════════════════ measurement CSV export ══
+
+    def _on_export_measurement_csv(self):
+        """Export raw (no range, no chunk) profile data for the selected measurement."""
+        import csv as _csv
+
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._measurements):
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Export CSV",
+                                    "Please select a measurement row in the table first.")
+            return
+
+        meas = self._measurements[row]
+        ts = QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss")
+        label = meas.get("label", str(meas["id"]))
+        default_name = f"measurement_{label}_{ts}.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Measurement CSV", default_name, "CSV Files (*.csv)")
+        if not path:
+            return
+
+        hp = meas.get("h_profile", [])
+        vp = meas.get("v_profile", [])
+        zp = meas.get("z_profile", [])
+        ps = meas.get("pixel_spacing")
+        z_xmm = meas.get("z_x_mm") or []
+
+        h_x_px  = list(range(len(hp)))
+        h_x_mm  = [i * ps[1] for i in h_x_px] if ps and len(ps) >= 2 else []
+        v_x_px  = list(range(len(vp)))
+        v_x_mm  = [i * ps[0] for i in v_x_px] if ps and len(ps) >= 2 else []
+        z_x_px  = list(range(len(zp)))
+        z_x_mm  = list(z_xmm)
+
+        n_rows = max(len(hp), len(vp), len(zp))
+
+        def _val(lst, i):
+            return lst[i] if i < len(lst) else ""
+
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            writer = _csv.writer(fh)
+            writer.writerow([
+                "h_x_px", "h_y",
+                "h_x_mm", "h_mm_y",
+                "v_x_px", "v_y",
+                "v_x_mm", "v_mm_y",
+                "z_x_px", "z_y",
+                "z_x_mm", "z_mm_y",
+            ])
+            for i in range(n_rows):
+                writer.writerow([
+                    _val(h_x_px, i), _val(hp,    i),
+                    _val(h_x_mm, i), _val(hp,    i),
+                    _val(v_x_px, i), _val(vp,    i),
+                    _val(v_x_mm, i), _val(vp,    i),
+                    _val(z_x_px, i), _val(zp,    i),
+                    _val(z_x_mm, i), _val(zp,    i),
+                ])
 
     # ══════════════════════════════════════════════════════ JSON export / import
 
