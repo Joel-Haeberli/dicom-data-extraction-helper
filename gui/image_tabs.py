@@ -87,13 +87,16 @@ class ImageTabs(QTabWidget):
             self._pixel_array_table._image_viewer.toggle_overlay(show)
     
     def set_series(self, image_files: List):
-        """Forward the full series to both 3D views."""
+        """Forward the full series to both 3D views and the script view."""
         vv = getattr(self._pixel_array_table, '_volume_view', None)
         if vv is not None:
             vv.set_series(image_files)
         pv = getattr(self._pixel_array_table, '_profile_view', None)
         if pv is not None:
             pv.set_series(image_files)
+        sv = getattr(self._pixel_array_table, '_script_view', None)
+        if sv is not None:
+            sv.set_series(image_files)
 
     def set_current_slice(self, index: int):
         """Forward the current slice index to the 3D view."""

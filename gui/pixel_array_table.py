@@ -1697,6 +1697,10 @@ Max: {stats['hu_max']:8.2f}"""
         # Forward to profile view
         if self._profile_view is not None:
             self._profile_view.set_dataset(ds, self._slope, self._intercept)
+
+        # Forward to script view
+        if getattr(self, '_script_view', None) is not None:
+            self._script_view.set_dataset(ds)
     
     def create_image_viewer(self) -> QTabWidget:
         """Create the image viewer tab widget, wire signals, and return it.
@@ -1735,11 +1739,16 @@ Max: {stats['hu_max']:8.2f}"""
         self._volume_view = VolumeView()
         self._volume_view.slice_changed.connect(self.image_index_changed)
 
+        # ── tab 3: live script view ───────────────────────────────────────────
+        from gui.script_view import ScriptView
+        self._script_view = ScriptView()
+
         # ── assemble tab widget ───────────────────────────────────────────────
         tabs = QTabWidget()
         tabs.addTab(self._image_viewer, "Image View")
         tabs.addTab(self._profile_view, "Profile View")
         tabs.addTab(self._volume_view, "3D View")
+        tabs.addTab(self._script_view, "Script")
 
         return tabs
 
