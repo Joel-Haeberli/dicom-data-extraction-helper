@@ -61,6 +61,54 @@ class DICOMLoader:
     def __init__(self):
         self.dicom_files: List[DICOMFile] = []
         self.current_directory: Optional[Path] = None
+        self._series_cache: Optional[List] = None  # Cache for converted series
+    
+    def get_series_list(self):
+        """
+        Convert loaded DICOM files to ImageSeries objects.
+        
+        This provides a bridge between the old DICOMFile-based architecture
+        and the new ImageSeries-based architecture.
+        
+        Returns:
+            List of ImageSeries objects, or empty list if no compatible files
+        """
+        try:
+            from models.image_series import ImageSeries, ImageSlice
+            from models.series_loader import SeriesLoader
+            
+            # Use SeriesLoader to convert our files to series
+            loader = SeriesLoader()
+            
+            # Group files by Series UID (similar to SeriesLoader logic)
+            series_files = {}
+            for dicom_file in self.dicom_files:
+                if dicom_file.dataset and hasattr(dicom_file.dataset, 'SeriesInstanceUID'):
+                    series_uid = str(dicom_file.dataset.SeriesInstanceUID)
+                    if series_uid not in series_files:
+                        series_files[series_uid] = []
+                    series_files[series_uid].append(dicom_file.filepath)
+            
+            # Load each series
+            series_list = []
+            for series_uid, file_paths in series_files.items():
+                series = loader.load_series(file_paths)
+                if series:
+                    series_list.append(series)
+            
+            self._series_cache = series_list
+            return series_list
+            
+        except ImportError:
+            # New models not available, return empty list
+            return []
+        except Exception as e:
+            print(f"Warning: Could not convert to series: {e}")
+            return []
+    
+    def clear_series_cache(self):
+        """Clear the cached series list."""
+        self._series_cache = None
     
     def load_directory(self, path: Path) -> List[DICOMFile]:
         """
