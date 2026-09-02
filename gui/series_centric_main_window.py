@@ -15,7 +15,7 @@ import sys
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QSplitter, QMessageBox
+    QSplitter, QMessageBox, QTabWidget
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
@@ -26,7 +26,12 @@ try:
         ObservableImageSeriesManager, Measurement, MeasurementCollection
     )
     from gui.widgets.series_selector import SeriesSelector
-    from gui.viewers import SeriesPixelArrayTable
+    from gui.viewers import (
+        SeriesPixelArrayTable, 
+        SeriesImageViewer, 
+        SeriesVolumeView,
+        SeriesCurveView
+    )
     from gui.explorer import DICOMExplorer
     HAS_NEW_ARCHITECTURE = True
 except ImportError as e:
@@ -93,8 +98,11 @@ class SeriesCentricMainWindow(QMainWindow):
         self._series_selector = SeriesSelector(self._series_manager)
         self._series_selector.series_selected.connect(self._on_series_selected)
         
-        # Series Pixel Array Table (proof of concept viewer)
+        # Create all viewers
         self._pixel_table = SeriesPixelArrayTable(self)
+        self._image_viewer = SeriesImageViewer(self)
+        self._volume_view = SeriesVolumeView(self)
+        self._curve_view = SeriesCurveView(self)
         
         # Info label
         self._info_label = QLabel("No DICOM directory loaded", self)
@@ -126,17 +134,27 @@ class SeriesCentricMainWindow(QMainWindow):
         # Add series selector
         left_layout.addWidget(self._series_selector, 1)
         
-        # Right panel: Pixel Array Table
+        # Right panel: Tab widget with all viewers
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(self._pixel_table, 1)
+        
+        # Create tab widget for viewers
+        self._viewer_tabs = QTabWidget(self)
+        
+        # Add viewers to tabs
+        self._viewer_tabs.addTab(self._image_viewer, "Image Viewer")
+        self._viewer_tabs.addTab(self._pixel_table, "Pixel Data")
+        self._viewer_tabs.addTab(self._volume_view, "Volume View")
+        self._viewer_tabs.addTab(self._curve_view, "HU Profile")
+        
+        right_layout.addWidget(self._viewer_tabs, 1)
         
         # Add panels to splitter
         main_splitter.addWidget(left_panel)
         main_splitter.addWidget(right_panel)
-        main_splitter.setStretchFactor(0, 1)  # Left panel: 1/3
-        main_splitter.setStretchFactor(1, 2)  # Right panel: 2/3
+        main_splitter.setStretchFactor(0, 1)  # Left panel: 1/4
+        main_splitter.setStretchFactor(1, 3)  # Right panel: 3/4
         
         # Add splitter to main layout
         main_layout.addWidget(main_splitter, 1)
@@ -192,6 +210,12 @@ class SeriesCentricMainWindow(QMainWindow):
         # Update all viewers with the new series
         if self._pixel_table:
             self._pixel_table.series = series
+        if self._image_viewer:
+            self._image_viewer.series = series
+        if self._volume_view:
+            self._volume_view.series = series
+        if self._curve_view:
+            self._curve_view.series = series
         
         self._update_ui_state()
     
@@ -213,7 +237,13 @@ class SeriesCentricMainWindow(QMainWindow):
             )
         elif has_series:
             series_count = len(self._series_manager.available_series)
-            self._info_label.setText(f"{series_count} series available - select one")
+            current_series = self._series_manager.current_series
+            if current_series:
+                self._info_label.setText(
+                    f"{series_count} series available - Current: {current_series.series_description or current_series.series_uid}"
+                )
+            else:
+                self._info_label.setText(f"{series_count} series available - select one")
         else:
             self._info_label.setText("No DICOM directory loaded")
         
@@ -227,16 +257,34 @@ class SeriesCentricMainWindow(QMainWindow):
         """Navigate to next slice in all viewers."""
         if self._pixel_table:
             self._pixel_table.next_slice()
+        if self._image_viewer:
+            self._image_viewer.next_slice()
+        if self._volume_view:
+            self._volume_view.next_slice()
+        if self._curve_view:
+            self._curve_view.next_slice()
     
     def prev_slice(self):
         """Navigate to previous slice in all viewers."""
         if self._pixel_table:
             self._pixel_table.prev_slice()
+        if self._image_viewer:
+            self._image_viewer.prev_slice()
+        if self._volume_view:
+            self._volume_view.prev_slice()
+        if self._curve_view:
+            self._curve_view.prev_slice()
     
     def go_to_slice(self, index: int):
         """Go to specific slice in all viewers."""
         if self._pixel_table:
             self._pixel_table.go_to_slice(index)
+        if self._image_viewer:
+            self._image_viewer.go_to_slice(index)
+        if self._volume_view:
+            self._volume_view.go_to_slice(index)
+        if self._curve_view:
+            self._curve_view.go_to_slice(index)
     
     def keyPressEvent(self, event):
         """Handle key press events for slice navigation."""
