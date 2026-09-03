@@ -32,11 +32,25 @@ class MeasurementService:
     - HU conversion for measurements
     - Measurement collection management
     - Measurement storage and retrieval
+    - Cursor size configuration and mouse wheel support
+    - Measurement mode state management
+    - Coordinated cursor positioning support
     """
     
     def __init__(self):
         """Initialize the measurement service."""
         self._measurement_collection = MeasurementCollection()
+        
+        # Measurement mode state
+        self._measurement_mode_enabled = False
+        self._cursor_size = 3  # Default cursor size
+        self._roi_form = 'square'  # Default ROI form (square, circle, cross)
+        self._cursor_position = (0, 0)  # Current cursor position (x, y)
+        self._current_slice_index = 0  # Current slice index for measurements
+        
+        # Cursor position history for coordination
+        self._cursor_position_history = []
+        self._max_history_size = 10
     
     @property
     def measurements(self) -> List[Measurement]:
@@ -635,3 +649,212 @@ class MeasurementService:
                 used_indices.add(i)
         
         return duplicates
+    
+    # Measurement mode state properties
+    @property
+    def measurement_mode_enabled(self) -> bool:
+        """Check if measurement mode is enabled."""
+        return self._measurement_mode_enabled
+    
+    @measurement_mode_enabled.setter
+    def measurement_mode_enabled(self, enabled: bool):
+        """Enable or disable measurement mode."""
+        self._measurement_mode_enabled = enabled
+    
+    @property
+    def cursor_size(self) -> int:
+        """Get the current cursor size."""
+        return self._cursor_size
+    
+    @cursor_size.setter
+    def cursor_size(self, size: int):
+        """Set the cursor size."""
+        self._cursor_size = max(1, min(size, 20))  # Clamp between 1 and 20
+    
+    @property
+    def roi_form(self) -> str:
+        """Get the current ROI form."""
+        return self._roi_form
+    
+    @roi_form.setter
+    def roi_form(self, form: str):
+        """Set the ROI form."""
+        if form in ['square', 'circle', 'cross', 'point']:
+            self._roi_form = form
+    
+    @property
+    def cursor_position(self) -> Tuple[int, int]:
+        """Get the current cursor position."""
+        return self._cursor_position
+    
+    @cursor_position.setter
+    def cursor_position(self, position: Tuple[int, int]):
+        """Set the cursor position."""
+        self._cursor_position = position
+        # Add to history for coordination
+        self._add_to_cursor_history(position)
+    
+    @property
+    def current_slice_index(self) -> int:
+        """Get the current slice index for measurements."""
+        return self._current_slice_index
+    
+    @current_slice_index.setter
+    def current_slice_index(self, index: int):
+        """Set the current slice index for measurements."""
+        self._current_slice_index = index
+    
+    def _add_to_cursor_history(self, position: Tuple[int, int]):
+        """Add a cursor position to history."""
+        self._cursor_position_history.append(position)
+        # Limit history size
+        if len(self._cursor_position_history) > self._max_history_size:
+            self._cursor_position_history = self._cursor_position_history[-self._max_history_size:]
+    
+    def increase_cursor_size(self, delta: int = 1):
+        """Increase cursor size (for mouse wheel support)."""
+        self.cursor_size = self._cursor_size + delta
+        return self._cursor_size
+    
+    def decrease_cursor_size(self, delta: int = 1):
+        """Decrease cursor size (for mouse wheel support)."""
+        self.cursor_size = self._cursor_size - delta
+        return self._cursor_size
+    
+    def cycle_roi_form(self) -> str:
+        """Cycle through available ROI forms."""
+        forms = ['square', 'circle', 'cross']
+        current_index = forms.index(self._roi_form)
+        next_index = (current_index + 1) % len(forms)
+        self.roi_form = forms[next_index]
+        return self._roi_form
+    
+    def set_measurement_mode_parameters(self, enabled: bool, cursor_size: int, 
+                                        roi_form: str = 'square', 
+                                        position: Optional[Tuple[int, int]] = None):
+        """
+        Set multiple measurement mode parameters at once.
+        
+        Args:
+            enabled: Whether measurement mode is enabled
+            cursor_size: Cursor size for measurements
+            roi_form: ROI form ('square', 'circle', 'cross')
+            position: Current cursor position (x, y)
+        """
+        self.measurement_mode_enabled = enabled
+        self.cursor_size = cursor_size
+        self.roi_form = roi_form
+        if position:
+            self.cursor_position = position
+    
+    def get_measurement_mode_state(self) -> Dict[str, Any]:
+        """Get the current measurement mode state as a dictionary."""
+        return {
+            'enabled': self.measurement_mode_enabled,
+            'cursor_size': self.cursor_size,
+            'roi_form': self.roi_form,
+            'cursor_position': self.cursor_position,
+            'slice_index': self.current_slice_index
+        }
+    
+    def capture_measurement_at_cursor(self, series: ImageSeries, 
+                                      slope: float = 1.0, 
+                                      intercept: float = 0.0,
+                                      name: str = 'ROI Measurement') -> Optional[Measurement]:
+        """
+        Capture a measurement at the current cursor position.
+        
+        This is a convenience method that uses the current cursor position,
+        size, and ROI form to create a measurement.
+        
+        Args:
+            series: ImageSeries to capture measurement from
+            slope: Rescale slope for HU conversion
+            intercept: Rescale intercept for HU conversion
+            name: Name for this measurement
+            
+        Returns:
+            Measurement object if successful, None otherwise
+        """
+        x, y = self.cursor_position
+        return self.create_roi_measurement(
+            series=series,
+            slice_index=self.current_slice_index,
+            x=x, y=y,
+            size=self.cursor_size,
+            roi_form=self.roi_form,
+            name=name,
+            slope=slope,
+            intercept=intercept
+        )
+    
+    def coordinate_cursor_position(self, x: int, y: int, slice_index: int,
+                                   series_uid: Optional[str] = None) -> bool:
+        """
+        Coordinate cursor position across multiple viewers.
+        
+        Args:
+            x: X coordinate
+            y: Y coordinate  
+            slice_index: Slice index
+            series_uid: Optional series UID for multi-series coordination
+            
+        Returns:
+            True if coordination was successful
+        """
+        try:
+            self.cursor_position = (x, y)
+            self.current_slice_index = slice_index
+            # Store series UID if provided for multi-series coordination
+            if series_uid:
+                # In a full implementation, this would be used to coordinate
+                # cursor positions across different series
+                pass
+            return True
+        except Exception as e:
+            print(f"Error coordinating cursor position: {e}")
+            return False
+    
+    def get_cursor_statistics(self, series: ImageSeries) -> Optional[Dict[str, Any]]:
+        """
+        Get statistics for the current cursor position and settings.
+        
+        Args:
+            series: ImageSeries to get statistics from
+            
+        Returns:
+            Dictionary with cursor statistics, or None if failed
+        """
+        if not series:
+            return None
+            
+        slice_obj = series.get_slice(self.current_slice_index)
+        if slice_obj is None or slice_obj.pixel_array is None:
+            return None
+        
+        pixel_array = slice_obj.pixel_array
+        x, y = self.cursor_position
+        
+        # Check bounds
+        if 0 <= y < pixel_array.shape[0] and 0 <= x < pixel_array.shape[1]:
+            pixel_value = float(pixel_array[y, x])
+            
+            # Get slope and intercept from metadata or defaults
+            slope = slice_obj.metadata.get('RescaleSlope', 1.0)
+            intercept = slice_obj.metadata.get('RescaleIntercept', 0.0)
+            
+            hu_value = pixel_value * slope + intercept
+            
+            return {
+                'x': x, 'y': y, 'slice_index': self.current_slice_index,
+                'z_position': slice_obj.z_position,
+                'raw_value': pixel_value,
+                'hu_value': hu_value,
+                'cursor_size': self.cursor_size,
+                'roi_form': self.roi_form,
+                'slope': slope,
+                'intercept': intercept,
+                'mm_per_pixel': self._get_mm_per_pixel(slice_obj)
+            }
+        
+        return None
