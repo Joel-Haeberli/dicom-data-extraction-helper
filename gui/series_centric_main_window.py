@@ -25,12 +25,15 @@ try:
         ImageSeries, ImageSeriesManager, SeriesLoader, 
         ObservableImageSeriesManager, Measurement, MeasurementCollection
     )
+    from services.measurement_service import MeasurementService
     from gui.widgets.series_selector import SeriesSelector
+    from gui.widgets.measurement_table import MeasurementTableWidget
     from gui.viewers import (
         SeriesPixelArrayTable, 
         SeriesImageViewer, 
         SeriesVolumeView,
-        SeriesCurveView
+        SeriesCurveView,
+        ComparisonView
     )
     from gui.explorer import DICOMExplorer
     HAS_NEW_ARCHITECTURE = True
@@ -72,6 +75,9 @@ class SeriesCentricMainWindow(QMainWindow):
         self._series_manager = ObservableImageSeriesManager(self)
         self._measurements = MeasurementCollection()
         
+        # Initialize measurement service
+        self._measurement_service = MeasurementService()
+        
         # Initialize UI components
         self._create_components()
         
@@ -98,11 +104,21 @@ class SeriesCentricMainWindow(QMainWindow):
         self._series_selector = SeriesSelector(self._series_manager)
         self._series_selector.series_selected.connect(self._on_series_selected)
         
+        # Create Measurement Table
+        self._measurement_table = MeasurementTableWidget(self._measurement_service, self)
+        self._measurement_table.measurement_selected.connect(self._on_measurement_selected)
+        self._measurement_table.measurement_deleted.connect(self._on_measurement_deleted)
+        
         # Create all viewers
-        self._pixel_table = SeriesPixelArrayTable(self)
-        self._image_viewer = SeriesImageViewer(self)
-        self._volume_view = SeriesVolumeView(self)
-        self._curve_view = SeriesCurveView(self)
+        self._pixel_table = SeriesPixelArrayTable(self, self._measurement_service)
+        self._image_viewer = SeriesImageViewer(self, self._measurement_service)
+        self._volume_view = SeriesVolumeView(self, self._measurement_service)
+        self._curve_view = SeriesCurveView(self, self._measurement_service)
+        self._comparison_view = ComparisonView(self._measurement_service, self)
+        
+        # Connect comparison view signals
+        if self._comparison_view:
+            self._comparison_view.measurement_selected.connect(self._on_measurement_selected)
         
         # Info label
         self._info_label = QLabel("No DICOM directory loaded", self)
@@ -147,6 +163,8 @@ class SeriesCentricMainWindow(QMainWindow):
         self._viewer_tabs.addTab(self._pixel_table, "Pixel Data")
         self._viewer_tabs.addTab(self._volume_view, "Volume View")
         self._viewer_tabs.addTab(self._curve_view, "HU Profile")
+        self._viewer_tabs.addTab(self._comparison_view, "Comparison")
+        self._viewer_tabs.addTab(self._measurement_table, "Measurements")
         
         right_layout.addWidget(self._viewer_tabs, 1)
         
@@ -164,6 +182,33 @@ class SeriesCentricMainWindow(QMainWindow):
         # Connect series manager signals to viewers
         self._series_manager.series_list_changed.connect(self._on_series_list_changed)
         self._series_manager.current_series_changed.connect(self._on_current_series_changed)
+        
+        # Connect measurement service to viewers for coordination
+        self._connect_measurement_signals()
+        
+        # Connect series changes to comparison view
+        if self._comparison_view:
+            self._series_manager.current_series_changed.connect(
+                lambda series: setattr(self._comparison_view, 'series', series) if self._comparison_view else None
+            )
+    
+    def _connect_measurement_signals(self):
+        """Connect measurement-related signals between components."""
+        # Connect pixel table cursor position changes to image viewer
+        if self._pixel_table and hasattr(self._pixel_table, 'cursor_position_changed'):
+            self._pixel_table.cursor_position_changed.connect(self._on_cursor_position_changed)
+        
+        # Connect image viewer cursor movements to pixel table
+        if self._image_viewer and hasattr(self._image_viewer, 'cursor_moved'):
+            self._image_viewer.cursor_moved.connect(self._on_image_cursor_moved)
+        
+        # Connect measurement captured signals
+        if self._pixel_table and hasattr(self._pixel_table, 'measurement_captured'):
+            self._pixel_table.measurement_captured.connect(self._on_measurement_captured)
+        
+        # Connect pixel table slice changes to update cursor display in image viewer
+        if self._pixel_table and self._image_viewer:
+            self._pixel_table.slice_changed.connect(self._update_cursor_display_in_viewers)
         
         # Connect pixel table navigation to series manager (if needed)
         # For now, the pixel table handles its own slice navigation
@@ -223,6 +268,76 @@ class SeriesCentricMainWindow(QMainWindow):
         """Handle user selection of a series from the selector."""
         # Set the selected series as current
         self._series_manager.set_current_series(series)
+    
+    def _on_measurement_selected(self, measurement_id: str):
+        """Handle measurement selection from the measurement table."""
+        # Coordinate viewers to show the selected measurement
+        if self._pixel_table:
+            # Find measurement and go to its slice
+            measurement = self._measurement_service.get_measurement_by_id(measurement_id)
+            if measurement:
+                self.go_to_slice(measurement.slice_index)
+                # Set cursor position in pixel table
+                if hasattr(self._pixel_table, 'set_cursor_position'):
+                    self._pixel_table.set_cursor_position(measurement.x, measurement.y)
+        
+        if self._image_viewer:
+            # Similar coordination for image viewer
+            measurement = self._measurement_service.get_measurement_by_id(measurement_id)
+            if measurement:
+                self.go_to_slice(measurement.slice_index)
+                # Highlight measurement position in image viewer
+                if hasattr(self._image_viewer, 'highlight_measurement'):
+                    self._image_viewer.highlight_measurement(measurement)
+    
+    def _on_measurement_deleted(self, measurement_id: str):
+        """Handle measurement deletion from the measurement table."""
+        # Measurement is already deleted from service, just update any viewer overlays
+        if self._image_viewer and hasattr(self._image_viewer, 'refresh_overlays'):
+            self._image_viewer.refresh_overlays()
+        if self._pixel_table and hasattr(self._pixel_table, 'refresh'):
+            self._pixel_table.refresh()
+    
+    def _on_cursor_position_changed(self, x: int, y: int):
+        """Handle cursor position changes from pixel table."""
+        # Update cursor position in image viewer
+        if self._image_viewer and hasattr(self._image_viewer, 'set_cursor_position'):
+            self._image_viewer.set_cursor_position(x, y)
+        
+        # Update measurement service
+        if self._measurement_service:
+            self._measurement_service.cursor_position = (x, y)
+    
+    def _on_image_cursor_moved(self, x: int, y: int):
+        """Handle cursor movement from image viewer."""
+        # Update cursor position in pixel table
+        if self._pixel_table and hasattr(self._pixel_table, 'set_absolute_cursor_position'):
+            self._pixel_table.set_absolute_cursor_position(x, y)
+        
+        # Update measurement service
+        if self._measurement_service:
+            self._measurement_service.cursor_position = (x, y)
+    
+    def _on_measurement_captured(self, measurement_id: str):
+        """Handle measurement captured from any viewer."""
+        # Refresh measurement table
+        self._measurement_table.refresh()
+        
+        # Highlight the new measurement in the image viewer
+        if self._image_viewer and hasattr(self._image_viewer, 'highlight_measurement'):
+            measurement = self._measurement_service.get_measurement_by_id(measurement_id)
+            if measurement:
+                self._image_viewer.highlight_measurement(measurement)
+    
+    def _update_cursor_display_in_viewers(self):
+        """Update cursor display in all viewers based on current state."""
+        # This is called when slice changes to ensure cursor display is updated
+        if self._image_viewer and hasattr(self._image_viewer, '_generate_measurement_overlay'):
+            self._image_viewer._generate_measurement_overlay()
+            self._image_viewer._update_display()
+        
+        if self._pixel_table and hasattr(self._pixel_table, '_update_cursor_display'):
+            self._pixel_table._update_cursor_display()
     
     def _update_ui_state(self):
         """Update UI state based on current data."""
@@ -301,3 +416,63 @@ class SeriesCentricMainWindow(QMainWindow):
         """Handle window close."""
         # Clean up if needed
         event.accept()
+    
+    @property
+    def measurement_service(self) -> MeasurementService:
+        """Get the measurement service."""
+        return self._measurement_service
+    
+    def capture_measurement_at_cursor(self, name: str = 'ROI Measurement') -> bool:
+        """
+        Capture a measurement at the current cursor position.
+        
+        This method uses the measurement service to capture a measurement
+        at the current cursor position with the current settings.
+        
+        Args:
+            name: Name for the new measurement
+            
+        Returns:
+            True if measurement was captured successfully
+        """
+        current_series = self._series_manager.current_series
+        if current_series and self._measurement_service:
+            # Get current slice and cursor position from pixel table if available
+            current_slice = self._pixel_table.current_slice if self._pixel_table else 0
+            cursor_x, cursor_y = 0, 0
+            
+            if self._pixel_table and hasattr(self._pixel_table, 'cursor_position'):
+                cursor_x, cursor_y = self._pixel_table.cursor_position
+            elif self._measurement_service:
+                cursor_x, cursor_y = self._measurement_service.cursor_position
+                current_slice = self._measurement_service.current_slice_index
+            
+            # Set current slice in measurement service
+            self._measurement_service.current_slice_index = current_slice
+            self._measurement_service.cursor_position = (cursor_x, cursor_y)
+            
+            # Get slope and intercept from current series
+            slope = 1.0
+            intercept = 0.0
+            slice_obj = current_series.get_slice(current_slice)
+            if slice_obj:
+                slope = slice_obj.metadata.get('RescaleSlope', 1.0)
+                intercept = slice_obj.metadata.get('RescaleIntercept', 0.0)
+            
+            # Capture measurement
+            measurement = self._measurement_service.capture_measurement_at_cursor(
+                current_series, slope, intercept, name
+            )
+            
+            if measurement:
+                # Refresh measurement table
+                self._measurement_table.refresh()
+                return True
+        
+        return False
+    
+    def get_measurement_count(self) -> int:
+        """Get the total number of measurements."""
+        if self._measurement_service:
+            return len(self._measurement_service.measurements)
+        return 0

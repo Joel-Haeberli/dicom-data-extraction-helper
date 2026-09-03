@@ -8,16 +8,20 @@ ImageSeries objects instead of individual DICOM files.
 This is a proof of concept for the new series-centric architecture.
 """
 
-from typing import Optional, List, Any, Dict, Tuple
+from typing import Optional, List, Any, Dict, Tuple, TYPE_CHECKING
 import numpy as np
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, 
     QTableWidgetItem, QHeaderView, QScrollArea, QSizePolicy, 
-    QFrame, QTabWidget, QSpinBox, QCheckBox, QPushButton
+    QFrame, QTabWidget, QSpinBox, QCheckBox, QPushButton, QComboBox
 )
 from PySide6.QtCore import Qt, Signal, QModelIndex, QAbstractTableModel
-from PySide6.QtGui import QColor, QPalette, QBrush
+from PySide6.QtGui import QColor, QPalette, QBrush, QFont
+
+if TYPE_CHECKING:
+    from services.measurement_service import MeasurementService
+    from models.measurement import Measurement
 
 try:
     from models.image_series import ImageSeries, ImageSlice
@@ -196,8 +200,11 @@ class SeriesPixelArrayTable(SeriesViewerWidget):
     # Additional signals specific to pixel array display
     window_changed = Signal(int, int, int, int)  # x, y, width, height
     pixel_selected = Signal(int, int)  # row, col of selected pixel
+    measurement_captured = Signal(str)  # measurement_id
+    cursor_position_changed = Signal(int, int)  # x, y
+    roi_parameters_changed = Signal(int, str)  # size, form
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, measurement_service: Optional['MeasurementService'] = None):
         """Initialize the series pixel array table."""
         # Call parent with call_setup_widget=False to avoid double setup
         super().__init__(parent, call_setup_widget=False)
@@ -210,6 +217,23 @@ class SeriesPixelArrayTable(SeriesViewerWidget):
         self._window_y = 0
         self._window_width = 30
         self._window_height = 30
+        
+        # Measurement mode state
+        self._measurement_mode_enabled = False
+        self._cursor_x = 0  # Cursor position in pixel coordinates
+        self._cursor_y = 0
+        self._cursor_size = 3  # Size for ROI measurements
+        self._roi_form = 'square'  # circle, square, cross
+        self._highlight_roi = True  # Whether to highlight ROI region
+        
+        # ROI display state
+        self._highlight_circle = False  # False = rectangle, True = circle
+        self._circle_diameter = 0
+        self._circle_center_x = 0
+        self._circle_center_y = 0
+        
+        # Measurement service integration
+        self._measurement_service = measurement_service
         
         # Setup UI
         self._setup_ui()
@@ -274,6 +298,29 @@ class SeriesPixelArrayTable(SeriesViewerWidget):
         self.slice_changed.connect(self._on_slice_changed)
         self._table.itemClicked.connect(self._on_table_item_clicked)
     
+    def _sync_with_measurement_service(self):
+        """Sync this viewer's state with the measurement service."""
+        if self._measurement_service:
+            self._measurement_mode_enabled = self._measurement_service.measurement_mode_enabled
+            self._cursor_size = self._measurement_service.cursor_size
+            self._roi_form = self._measurement_service.roi_form
+            self._cursor_x, self._cursor_y = self._measurement_service.cursor_position
+            self._current_slice = self._measurement_service.current_slice_index
+            
+            # Update UI to reflect service state
+            self._measurement_mode_checkbox.setChecked(self._measurement_mode_enabled)
+            self._cursor_size_spin.setValue(self._cursor_size)
+            self._roi_form_combo.setCurrentText(self._roi_form)
+    
+    def _sync_measurement_mode_to_service(self):
+        """Sync this viewer's measurement mode state to the service."""
+        if self._measurement_service:
+            self._measurement_service.measurement_mode_enabled = self._measurement_mode_enabled
+            self._measurement_service.cursor_size = self._cursor_size
+            self._measurement_service.roi_form = self._roi_form
+            self._measurement_service.cursor_position = (self._cursor_x, self._cursor_y)
+            self._measurement_service.current_slice_index = self._current_slice
+    
     def _create_control_panel(self, layout):
         """Create the control panel with options."""
         control_layout = QHBoxLayout()
@@ -294,6 +341,36 @@ class SeriesPixelArrayTable(SeriesViewerWidget):
         self._hu_checkbox.setChecked(False)
         self._hu_checkbox.stateChanged.connect(self._on_show_hu_changed)
         control_layout.addWidget(self._hu_checkbox)
+        
+        # Measurement mode controls
+        control_layout.addWidget(QLabel("|", self))
+        
+        # Measurement mode toggle
+        self._measurement_mode_checkbox = QCheckBox("Measurement", self)
+        self._measurement_mode_checkbox.setChecked(False)
+        self._measurement_mode_checkbox.stateChanged.connect(self._on_measurement_mode_changed)
+        control_layout.addWidget(self._measurement_mode_checkbox)
+        
+        # Cursor size control
+        control_layout.addWidget(QLabel("Size:", self))
+        self._cursor_size_spin = QSpinBox(self)
+        self._cursor_size_spin.setRange(1, 20)
+        self._cursor_size_spin.setValue(3)
+        self._cursor_size_spin.valueChanged.connect(self._on_cursor_size_changed)
+        control_layout.addWidget(self._cursor_size_spin)
+        
+        # ROI form selector
+        self._roi_form_combo = QComboBox(self)
+        self._roi_form_combo.addItems(['square', 'circle', 'cross'])
+        self._roi_form_combo.setCurrentText('square')
+        self._roi_form_combo.currentTextChanged.connect(self._on_roi_form_changed)
+        control_layout.addWidget(self._roi_form_combo)
+        
+        # Capture measurement button
+        self._capture_button = QPushButton("Capture", self)
+        self._capture_button.setEnabled(False)
+        self._capture_button.clicked.connect(self._on_capture_clicked)
+        control_layout.addWidget(self._capture_button)
         
         control_layout.addStretch(1)
         layout.addLayout(control_layout)
@@ -378,7 +455,16 @@ class SeriesPixelArrayTable(SeriesViewerWidget):
                         item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                         self._table.setItem(row, col, item)
                     else:
-                        self._table.item(row, col).setText(text)
+                        item = self._table.item(row, col)
+                        item.setText(text)
+                    
+                    # Clear highlighting if measurement mode is disabled
+                    if not self._measurement_mode_enabled:
+                        item.setBackground(QColor(43, 43, 43))  # Reset to table background
+                        item.setForeground(QColor(224, 224, 224))  # Reset to normal text color
+                    # Apply ROI highlighting if measurement mode is enabled
+                    elif self._measurement_mode_enabled and self._highlight_roi:
+                        self._apply_roi_highlighting(item, row, col)
         
         # Set header labels
         horizontal_labels = [str(self._window_x + col) for col in range(cols)]
@@ -389,6 +475,54 @@ class SeriesPixelArrayTable(SeriesViewerWidget):
         
         # Resize columns to contents
         self._table.resizeColumnsToContents()
+    
+    def _apply_roi_highlighting(self, item: QTableWidgetItem, row: int, col: int):
+        """Apply ROI highlighting to a table cell based on cursor position and form."""
+        if not item:
+            return
+        
+        if self._highlight_circle and self._circle_diameter > 0:
+            # Circle mode: check if cell is within circle
+            dx = col - self._circle_center_x
+            dy = row - self._circle_center_y
+            radius = self._circle_diameter / 2
+            distance_squared = dx*dx + dy*dy
+            
+            if distance_squared <= radius*radius:
+                # Cell is inside circle - highlight it
+                if col == self._circle_center_x and row == self._circle_center_y:
+                    # Center cell - bright green
+                    item.setBackground(QColor(0, 200, 0))
+                    item.setForeground(QColor(255, 255, 255))
+                else:
+                    # Regular circle cell - semi-transparent blue
+                    item.setBackground(QColor(0, 100, 255, 128))
+                    item.setForeground(QColor(255, 255, 255))
+            else:
+                # Cell is outside circle - normal appearance
+                item.setBackground(QColor(43, 43, 43))  # Match table background
+                item.setForeground(QColor(224, 224, 224))  # Normal text color
+        else:
+            # Rectangle mode: highlight all cells in the ROI region
+            half_size = self._cursor_size // 2
+            min_col = max(0, self._cursor_x - half_size)
+            max_col = min(cols - 1, self._cursor_x + half_size)
+            min_row = max(0, self._cursor_y - half_size)
+            max_row = min(rows - 1, self._cursor_y + half_size)
+            
+            if (min_col <= col <= max_col and min_row <= row <= max_row):
+                if col == self._cursor_x and row == self._cursor_y:
+                    # Center cell - bright green
+                    item.setBackground(QColor(0, 200, 0))
+                    item.setForeground(QColor(255, 255, 255))
+                else:
+                    # Regular rectangle cell - semi-transparent blue
+                    item.setBackground(QColor(0, 100, 255, 128))
+                    item.setForeground(QColor(255, 255, 255))
+            else:
+                # Cell is outside rectangle - normal appearance
+                item.setBackground(QColor(43, 43, 43))  # Match table background
+                item.setForeground(QColor(224, 224, 224))  # Normal text color
     
     def _on_table_item_clicked(self, item: QTableWidgetItem):
         """Handle table item clicks."""
@@ -514,3 +648,228 @@ class SeriesPixelArrayTable(SeriesViewerWidget):
         """Refresh the display."""
         self._update_info_label()
         self._update_table_data()
+    
+    # Measurement mode methods
+    def _on_measurement_mode_changed(self, state: int):
+        """Handle measurement mode toggle."""
+        self._measurement_mode_enabled = state == Qt.Checked
+        self._capture_button.setEnabled(self._measurement_mode_enabled and self.has_series)
+        self._update_cursor_display()
+        self._sync_measurement_mode_to_service()
+    
+    def _on_cursor_size_changed(self, size: int):
+        """Handle cursor size changes."""
+        self._cursor_size = size
+        self._update_cursor_display()
+        self.roi_parameters_changed.emit(size, self._roi_form)
+        if self._measurement_service:
+            self._measurement_service.cursor_size = size
+    
+    def _on_roi_form_changed(self, form: str):
+        """Handle ROI form changes."""
+        self._roi_form = form
+        self._update_cursor_display()
+        self.roi_parameters_changed.emit(self._cursor_size, form)
+        if self._measurement_service:
+            self._measurement_service.roi_form = form
+    
+    def _on_capture_clicked(self):
+        """Handle capture button click."""
+        self._capture_measurement()
+    
+    def _capture_measurement(self) -> bool:
+        """Capture a measurement at the current cursor position."""
+        if not self.has_series or not self._measurement_service:
+            return False
+        
+        # Get current slice and position
+        slice_obj = self.current_slice_object
+        if not slice_obj or slice_obj.pixel_array is None:
+            return False
+        
+        pixel_array = slice_obj.pixel_array
+        
+        # Calculate actual cursor position in pixel array coordinates
+        actual_x = self._window_x + self._cursor_x
+        actual_y = self._window_y + self._cursor_y
+        
+        # Check bounds
+        if (0 <= actual_y < pixel_array.shape[0] and 
+            0 <= actual_x < pixel_array.shape[1]):
+            
+            # Get slope and intercept for HU conversion
+            slope = slice_obj.metadata.get('RescaleSlope', 1.0)
+            intercept = slice_obj.metadata.get('RescaleIntercept', 0.0)
+            
+            # Use measurement service to create measurement
+            measurement = self._measurement_service.create_roi_measurement(
+                series=self.series,
+                slice_index=self.current_slice,
+                x=actual_x,
+                y=actual_y,
+                size=self._cursor_size,
+                roi_form=self._roi_form,
+                name=f"Measurement {self._measurement_service.measurement_collection.count + 1}",
+                slope=slope,
+                intercept=intercept
+            )
+            
+            if measurement:
+                self.measurement_captured.emit(measurement.measurement_id)
+                return True
+        
+        return False
+    
+    def set_cursor_position(self, x: int, y: int):
+        """Set the cursor position within the current window."""
+        # Convert from absolute coordinates to window-relative coordinates
+        relative_x = x - self._window_x
+        relative_y = y - self._window_y
+        
+        # Clamp to window boundaries
+        max_x = max(0, self._window_width - 1)
+        max_y = max(0, self._window_height - 1)
+        relative_x = max(0, min(relative_x, max_x))
+        relative_y = max(0, min(relative_y, max_y))
+        
+        self._cursor_x = relative_x
+        self._cursor_y = relative_y
+        self._update_cursor_display()
+        self.cursor_position_changed.emit(x, y)
+        
+        # Update absolute position in measurement service
+        if self._measurement_service:
+            self._measurement_service.cursor_position = (x, y)
+            self._measurement_service.current_slice_index = self.current_slice
+    
+    def set_absolute_cursor_position(self, x: int, y: int):
+        """Set the absolute cursor position in pixel array coordinates."""
+        # Store absolute position
+        abs_x, abs_y = x, y
+        
+        # Convert to window-relative coordinates
+        relative_x = x - self._window_x
+        relative_y = y - self._window_y
+        
+        # Clamp to window boundaries
+        max_x = max(0, self._window_width - 1)
+        max_y = max(0, self._window_height - 1)
+        relative_x = max(0, min(relative_x, max_x))
+        relative_y = max(0, min(relative_y, max_y))
+        
+        self._cursor_x = relative_x
+        self._cursor_y = relative_y
+        self._update_cursor_display()
+        self.cursor_position_changed.emit(abs_x, abs_y)
+        
+        # Update position in measurement service
+        if self._measurement_service:
+            self._measurement_service.cursor_position = (abs_x, abs_y)
+            self._measurement_service.current_slice_index = self.current_slice
+    
+    def _update_cursor_display(self):
+        """Update the display to show cursor position and ROI."""
+        if not self.has_series:
+            return
+        
+        # Set up ROI highlighting based on cursor position and form
+        if self._measurement_mode_enabled and self._highlight_roi:
+            if self._roi_form == 'circle':
+                self._highlight_circle = True
+                self._circle_diameter = self._cursor_size
+                self._circle_center_x = self._cursor_x
+                self._circle_center_y = self._cursor_y
+            else:
+                self._highlight_circle = False
+        else:
+            self._highlight_circle = False
+        
+        # Trigger table refresh to show ROI highlighting
+        self._update_table_data()
+    
+    def set_highlight_region(self, is_circle: bool, diameter: int = 0, 
+                            center_x: int = 0, center_y: int = 0):
+        """
+        Set the highlighted region for ROI visualization.
+        
+        Args:
+            is_circle: True for circle mode, False for rectangle (all cells)
+            diameter: Diameter of circle in cells (for circle mode)
+            center_x: Center X within window (0-indexed)
+            center_y: Center Y within window (0-indexed)
+        """
+        self._highlight_circle = is_circle
+        if is_circle:
+            self._circle_diameter = diameter
+            self._circle_center_x = center_x
+            self._circle_center_y = center_y
+        
+        # Update display to show the highlighting
+        self._update_table_data()
+    
+    def set_measurement_mode(self, enabled: bool):
+        """Set whether measurement mode is enabled."""
+        self._measurement_mode_enabled = enabled
+        self._measurement_mode_checkbox.setChecked(enabled)
+        self._capture_button.setEnabled(enabled and self.has_series)
+        self._update_cursor_display()
+        self._sync_measurement_mode_to_service()
+    
+    def get_measurement_mode_state(self) -> Dict[str, Any]:
+        """Get the current measurement mode state."""
+        return {
+            'enabled': self._measurement_mode_enabled,
+            'cursor_size': self._cursor_size,
+            'roi_form': self._roi_form,
+            'cursor_x': self._cursor_x,
+            'cursor_y': self._cursor_y,
+            'window_x': self._window_x,
+            'window_y': self._window_y
+        }
+    
+    def set_measurement_service(self, service: 'MeasurementService'):
+        """Set the measurement service."""
+        self._measurement_service = service
+        if service:
+            self._sync_with_measurement_service()
+    
+    def keyPressEvent(self, event):
+        """Handle key press events for cursor navigation."""
+        if self._measurement_mode_enabled and self.has_series:
+            if event.key() == Qt.Key_Up:
+                self.set_cursor_position(self._cursor_x, max(0, self._cursor_y - 1))
+                event.accept()
+                return
+            elif event.key() == Qt.Key_Down:
+                self.set_cursor_position(self._cursor_x, min(self._window_height - 1, self._cursor_y + 1))
+                event.accept()
+                return
+            elif event.key() == Qt.Key_Left:
+                self.set_cursor_position(max(0, self._cursor_x - 1), self._cursor_y)
+                event.accept()
+                return
+            elif event.key() == Qt.Key_Right:
+                self.set_cursor_position(min(self._window_width - 1, self._cursor_x + 1), self._cursor_y)
+                event.accept()
+                return
+            elif event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+                if self._measurement_mode_enabled:
+                    self._capture_measurement()
+                    event.accept()
+                    return
+        
+        # Pass to parent for normal handling
+        super().keyPressEvent(event)
+    
+    def wheelEvent(self, event):
+        """Handle wheel events for cursor size adjustment."""
+        if self._measurement_mode_enabled and event.modifiers() == Qt.ControlModifier:
+            # Ctrl+Wheel: Change cursor size
+            if event.angleDelta().y() > 0:
+                self.cursor_size = min(self._cursor_size + 1, 20)
+            else:
+                self.cursor_size = max(self._cursor_size - 1, 1)
+            event.accept()
+        else:
+            # Pass to parent for normal scrolling
+            super().wheelEvent(event)

@@ -10,6 +10,7 @@ from .pixel_array_table import SeriesPixelArrayTable, SeriesPixelArrayModel
 from .image_viewer import SeriesImageViewer, ImageViewer
 from .volume_view import SeriesVolumeView, VolumeView
 from .curve_view import SeriesCurveView, CurveView
+from .comparison_view import ComparisonView
 
 __all__ = [
     'SeriesViewer', 
@@ -22,5 +23,6 @@ __all__ = [
     'SeriesVolumeView',
     'VolumeView',
     'SeriesCurveView',
-    'CurveView'
+    'CurveView',
+    'ComparisonView'
 ]
