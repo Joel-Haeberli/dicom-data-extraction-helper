@@ -107,3 +107,19 @@ class ObservableImageSeriesManager(ImageSeriesManager, QObject):
         if series:
             return self.remove_series(series)
         return False
+
+    # CRITICAL FIX: Override the current_series property to add signal emission
+    # This ensures that direct assignment (manager.current_series = series) emits signals
+    @property
+    def current_series(self) -> Optional["ImageSeries"]:
+        """Get the currently selected series."""
+        return self._current_series
+    
+    @current_series.setter
+    def current_series(self, series: Optional["ImageSeries"]):
+        """Set current series with signal emission."""
+        if series != self._current_series:
+            # Call the ImageSeriesManager's set_current_series method directly to avoid double signaling
+            ImageSeriesManager.set_current_series(self, series)
+            # Emit signal for UI updates
+            self.current_series_changed.emit(self._current_series)

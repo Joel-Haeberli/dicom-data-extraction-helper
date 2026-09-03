@@ -208,9 +208,32 @@ class SeriesCentricMainWindow(QMainWindow):
     
     def _connect_signals(self):
         """Connect all signals between components."""
-        # Connect series manager signals to viewers
+        # Connect series manager signals to main window handlers
         self._series_manager.series_list_changed.connect(self._on_series_list_changed)
         self._series_manager.current_series_changed.connect(self._on_current_series_changed)
+        
+        # CRITICAL FIX: Connect series manager to series selector for automatic updates
+        self._series_manager.series_list_changed.connect(self._series_selector._update_series_list)
+        
+        # CRITICAL FIX: Connect current series to all viewers directly for immediate updates
+        self._series_manager.current_series_changed.connect(
+            lambda series: setattr(self._pixel_table, 'series', series) if self._pixel_table else None
+        )
+        self._series_manager.current_series_changed.connect(
+            lambda series: setattr(self._image_viewer, 'series', series) if self._image_viewer else None
+        )
+        self._series_manager.current_series_changed.connect(
+            lambda series: setattr(self._volume_view, 'series', series) if self._volume_view else None
+        )
+        self._series_manager.current_series_changed.connect(
+            lambda series: setattr(self._curve_view, 'series', series) if self._curve_view else None
+        )
+        self._series_manager.current_series_changed.connect(
+            lambda series: setattr(self._comparison_view, 'series', series) if self._comparison_view else None
+        )
+        self._series_manager.current_series_changed.connect(
+            self._measurement_table.refresh
+        )
         
         # Connect viewer slice changes to update navigation controls
         if self._pixel_table and hasattr(self._pixel_table, 'slice_changed'):
@@ -220,15 +243,17 @@ class SeriesCentricMainWindow(QMainWindow):
         if self._volume_view and hasattr(self._volume_view, 'slice_changed'):
             self._volume_view.slice_changed.connect(self._update_navigation_controls)
         
+        # CRITICAL FIX: Connect all viewer slice changes to navigation controls for synchronization
+        for viewer in [self._pixel_table, self._image_viewer, self._volume_view, self._curve_view]:
+            if viewer and hasattr(viewer, 'slice_changed'):
+                viewer.slice_changed.connect(self._update_navigation_controls)
+        
         # Connect pixel table window changes to curve view for profile updates
         if self._pixel_table and self._curve_view and hasattr(self._pixel_table, 'window_changed'):
             self._pixel_table.window_changed.connect(self._on_pixel_table_window_changed)
         
         # Connect series changes to curve view to ensure it updates
         if self._curve_view:
-            self._series_manager.current_series_changed.connect(
-                lambda series: setattr(self._curve_view, 'series', series) if self._curve_view else None
-            )
             self._pixel_table.slice_changed.connect(
                 lambda: self._curve_view._update_from_series() if self._curve_view else None
             )
@@ -250,6 +275,10 @@ class SeriesCentricMainWindow(QMainWindow):
             self._series_manager.current_series_changed.connect(
                 lambda series: setattr(self._comparison_view, 'series', series) if self._comparison_view else None
             )
+        
+        # Connect comparison view slice changes to navigation controls
+        if self._comparison_view and hasattr(self._comparison_view, 'slice_changed'):
+            self._comparison_view.slice_changed.connect(self._update_navigation_controls)
     
     def _connect_measurement_signals(self):
         """Connect measurement-related signals between components."""
@@ -269,6 +298,19 @@ class SeriesCentricMainWindow(QMainWindow):
         if self._pixel_table and self._image_viewer:
             self._pixel_table.slice_changed.connect(self._update_cursor_display_in_viewers)
         
+        # CRITICAL FIX: Connect measurement service to all viewers
+        if self._measurement_service:
+            if self._pixel_table and hasattr(self._pixel_table, 'set_measurement_service'):
+                self._pixel_table.set_measurement_service(self._measurement_service)
+            if self._image_viewer and hasattr(self._image_viewer, 'set_measurement_service'):
+                self._image_viewer.set_measurement_service(self._measurement_service)
+            if self._volume_view and hasattr(self._volume_view, 'set_measurement_service'):
+                self._volume_view.set_measurement_service(self._measurement_service)
+            if self._curve_view and hasattr(self._curve_view, 'set_measurement_service'):
+                self._curve_view.set_measurement_service(self._measurement_service)
+            if self._comparison_view and hasattr(self._comparison_view, 'set_measurement_service'):
+                self._comparison_view.set_measurement_service(self._measurement_service)
+        
         # Connect ROI parameter changes between viewers for synchronization
         if self._pixel_table and self._image_viewer:
             if hasattr(self._pixel_table, 'roi_parameters_changed'):
@@ -286,10 +328,12 @@ class SeriesCentricMainWindow(QMainWindow):
             series_list = self._series_loader.load_series_from_directory(path)
             
             if not series_list:
-                QMessageBox.information(
-                    self,
-                    "No Series Found",
-                    f"No DICOM series found in:\n{path}"
+                # Get detailed error message from loader
+                error = self._series_loader.get_last_error() or "No DICOM files found"
+                QMessageBox.warning(
+                    self, 
+                    "No Series Found", 
+                    f"{error}\n\nPath: {path}"
                 )
                 self._info_label.setText(f"No series in: {path.name}")
                 return
@@ -297,15 +341,29 @@ class SeriesCentricMainWindow(QMainWindow):
             # Load series into manager
             self._series_manager.load_series_list(series_list)
             
-            # Update info
+            # Set first series as current if available
+            if series_list:
+                self._series_manager.set_current_series(series_list[0])
+            
+            # Update info with loading statistics
             series_count = len(series_list)
             total_slices = sum(s.num_slices for s in series_list)
+            stats = self._series_loader.get_loading_stats()
             self._info_label.setText(f"Loaded {series_count} series ({total_slices} slices) from: {path.name}")
+            
+            # Show success message if there were failures
+            if stats.get('failed', 0) > 0:
+                QMessageBox.information(
+                    self,
+                    "Partial Load",
+                    f"Loaded {stats.get('success', 0)} series successfully, "
+                    f"{stats.get('failed', 0)} series failed to load."
+                )
             
         except Exception as e:
             QMessageBox.critical(
                 self,
-                "Error Loading Series",
+                "Loading Error",
                 f"Failed to load series from {path}:\n{str(e)}"
             )
             self._info_label.setText("Error loading series")

@@ -38,6 +38,8 @@ class SeriesLoader:
     def __init__(self):
         """Initialize the series loader."""
         self._tag_categories = None
+        self._last_error = None
+        self._loading_stats = {'success': 0, 'failed': 0}
         self._try_load_tag_categories()
     
     def _try_load_tag_categories(self):
@@ -52,11 +54,27 @@ class SeriesLoader:
     def find_dicom_files(self, path: Path) -> List[Path]:
         """Find all DICOM files in a directory recursively."""
         try:
-            from dicom_header_extractor import find_dicom_files
-            return find_dicom_files(path)
-        except ImportError:
-            # Fallback implementation
+            from dicom_header_extractor import find_dicom_files as external_find
+            dicom_files = external_find(path)
+            if not isinstance(dicom_files, (list, tuple)):
+                raise TypeError(f"Expected list, got {type(dicom_files)}")
+            return list(dicom_files)
+        except Exception as e:
+            self._last_error = f"DICOM detection failed: {e}"
+            self._loading_stats['failed'] += 1
             return self._find_dicom_files_fallback(path)
+    
+    def get_last_error(self) -> Optional[str]:
+        """Get the last error that occurred during loading."""
+        return self._last_error
+    
+    def get_loading_stats(self) -> Dict[str, int]:
+        """Get loading statistics."""
+        return self._loading_stats.copy()
+    
+    def clear_last_error(self):
+        """Clear the last error."""
+        self._last_error = None
     
     def _find_dicom_files_fallback(self, path: Path) -> List[Path]:
         """Fallback implementation for finding DICOM files."""
@@ -381,17 +399,38 @@ class SeriesLoader:
         Returns:
             List of ImageSeries objects found in the directory
         """
-        # Find all DICOM files and group by series
-        series_files = self.find_series_in_directory(path)
+        self._last_error = None  # Clear previous errors
         
-        series_list = []
-        for series_uid, file_list in series_files.items():
-            if series_uid != 'UNKNOWN':  # Skip files we couldn't categorize
-                series = self.load_series(file_list)
-                if series:
-                    series_list.append(series)
-        
-        return series_list
+        try:
+            # Find all DICOM files and group by series
+            series_files = self.find_series_in_directory(path)
+            
+            if not series_files:
+                self._last_error = f"No DICOM files found in {path}"
+                return []
+            
+            series_list = []
+            for series_uid, file_list in series_files.items():
+                if series_uid != 'UNKNOWN':  # Skip files we couldn't categorize
+                    try:
+                        series = self.load_series(file_list)
+                        if series:
+                            series_list.append(series)
+                            self._loading_stats['success'] += 1
+                        else:
+                            self._loading_stats['failed'] += 1
+                    except Exception as e:
+                        self._last_error = f"Failed to load series {series_uid}: {e}"
+                        self._loading_stats['failed'] += 1
+            
+            if not series_list:
+                self._last_error = f"No valid series found in {path}"
+            
+            return series_list
+            
+        except Exception as e:
+            self._last_error = f"Failed to load series from directory {path}: {e}"
+            return []
     
     def load_multiple_directories(self, paths: List[Path]) -> List[ImageSeries]:
         """
