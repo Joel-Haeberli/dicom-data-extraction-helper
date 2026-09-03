@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any, List, Tuple, TYPE_CHECKING
 import numpy as np
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QGroupBox, QHBoxLayout, QPushButton, QSpinBox, QCheckBox
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, Qt
 
 if TYPE_CHECKING:
     from models.image_series import ImageSeries, ImageSlice
@@ -606,6 +606,20 @@ class SeriesVolumeView(SeriesViewerWidget):
     def prev_slice(self):
         """Go to previous slice and update display."""
         super().prev_slice()
+
+    def wheelEvent(self, event):
+        """Handle wheel events for slice navigation."""
+        # Check if this is a regular wheel event (no modifiers)
+        if event.modifiers() == Qt.NoModifier:
+            # Regular wheel: Navigate slices
+            if event.angleDelta().y() > 0:
+                self.prev_slice()
+            else:
+                self.next_slice()
+            event.accept()
+        else:
+            # Pass to parent for normal scrolling behavior
+            super().wheelEvent(event)
     
     def clear(self):
         """Clear the current series and volume data."""

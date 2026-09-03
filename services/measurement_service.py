@@ -523,6 +523,10 @@ class MeasurementService:
         """Get all measurements for a specific slice in a series."""
         return self._measurement_collection.get_measurements_by_slice(series_uid, slice_index)
     
+    def get_measurement_by_id(self, measurement_id: str) -> Optional[Measurement]:
+        """Get a specific measurement by its ID."""
+        return self._measurement_collection.get_measurement_by_id(measurement_id)
+    
     def update_measurement_name(self, measurement_id: str, new_name: str) -> bool:
         """Update the name of a measurement."""
         measurement = self._measurement_collection.get_measurement_by_id(measurement_id)

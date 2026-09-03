@@ -15,7 +15,7 @@ import sys
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QSplitter, QMessageBox, QTabWidget
+    QSplitter, QMessageBox, QTabWidget, QPushButton, QSpinBox
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
@@ -123,6 +123,23 @@ class SeriesCentricMainWindow(QMainWindow):
         # Info label
         self._info_label = QLabel("No DICOM directory loaded", self)
         self._info_label.setStyleSheet("color: #e0e0e0; font-style: italic;")
+        
+        # Navigation controls
+        self._prev_button = QPushButton("←", self)
+        self._prev_button.setToolTip("Previous slice")
+        self._prev_button.setEnabled(False)
+        
+        self._next_button = QPushButton("→", self)
+        self._next_button.setToolTip("Next slice")
+        self._next_button.setEnabled(False)
+        
+        self._slice_spin = QSpinBox(self)
+        self._slice_spin.setToolTip("Current slice")
+        self._slice_spin.setEnabled(False)
+        
+        # Current slice label
+        self._slice_info_label = QLabel("/ 0", self)
+        self._slice_info_label.setStyleSheet("color: #e0e0e0;")
     
     def _setup_layout(self):
         """Setup the main layout."""
@@ -133,6 +150,18 @@ class SeriesCentricMainWindow(QMainWindow):
         
         # Info label at the top
         main_layout.addWidget(self._info_label)
+        
+        # Navigation controls row
+        nav_layout = QHBoxLayout()
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(8)
+        nav_layout.addStretch(1)
+        nav_layout.addWidget(self._prev_button)
+        nav_layout.addWidget(self._slice_spin)
+        nav_layout.addWidget(self._slice_info_label)
+        nav_layout.addWidget(self._next_button)
+        nav_layout.addStretch(1)
+        main_layout.addLayout(nav_layout)
         
         # Main splitter for layout organization
         main_splitter = QSplitter(Qt.Horizontal, self)
@@ -183,8 +212,38 @@ class SeriesCentricMainWindow(QMainWindow):
         self._series_manager.series_list_changed.connect(self._on_series_list_changed)
         self._series_manager.current_series_changed.connect(self._on_current_series_changed)
         
+        # Connect viewer slice changes to update navigation controls
+        if self._pixel_table and hasattr(self._pixel_table, 'slice_changed'):
+            self._pixel_table.slice_changed.connect(self._update_navigation_controls)
+        if self._image_viewer and hasattr(self._image_viewer, 'slice_changed'):
+            self._image_viewer.slice_changed.connect(self._update_navigation_controls)
+        if self._volume_view and hasattr(self._volume_view, 'slice_changed'):
+            self._volume_view.slice_changed.connect(self._update_navigation_controls)
+        
+        # Connect pixel table window changes to curve view for profile updates
+        if self._pixel_table and self._curve_view and hasattr(self._pixel_table, 'window_changed'):
+            self._pixel_table.window_changed.connect(self._on_pixel_table_window_changed)
+        
+        # Connect series changes to curve view to ensure it updates
+        if self._curve_view:
+            self._series_manager.current_series_changed.connect(
+                lambda series: setattr(self._curve_view, 'series', series) if self._curve_view else None
+            )
+            self._pixel_table.slice_changed.connect(
+                lambda: self._curve_view._update_from_series() if self._curve_view else None
+            )
+        
+        # Connect pixel table pixel selection to curve view row selection
+        if self._pixel_table and self._curve_view and hasattr(self._pixel_table, 'pixel_selected'):
+            self._pixel_table.pixel_selected.connect(self._on_pixel_selected)
+        
         # Connect measurement service to viewers for coordination
         self._connect_measurement_signals()
+        
+        # Connect navigation controls
+        self._prev_button.clicked.connect(self._on_prev_button_clicked)
+        self._next_button.clicked.connect(self._on_next_button_clicked)
+        self._slice_spin.valueChanged.connect(self._on_slice_spin_changed)
         
         # Connect series changes to comparison view
         if self._comparison_view:
@@ -209,6 +268,11 @@ class SeriesCentricMainWindow(QMainWindow):
         # Connect pixel table slice changes to update cursor display in image viewer
         if self._pixel_table and self._image_viewer:
             self._pixel_table.slice_changed.connect(self._update_cursor_display_in_viewers)
+        
+        # Connect ROI parameter changes between viewers for synchronization
+        if self._pixel_table and self._image_viewer:
+            if hasattr(self._pixel_table, 'roi_parameters_changed'):
+                self._pixel_table.roi_parameters_changed.connect(self._on_roi_parameters_changed)
         
         # Connect pixel table navigation to series manager (if needed)
         # For now, the pixel table handles its own slice navigation
@@ -346,9 +410,10 @@ class SeriesCentricMainWindow(QMainWindow):
         
         # Update info label
         if current_series:
+            current_slice = self._pixel_table.current_slice if self._pixel_table else 0
             self._info_label.setText(
                 f"Series: {current_series.series_description or current_series.series_uid} "
-                f"| Slice: {self._pixel_table.current_slice + 1}/{current_series.num_slices}"
+                f"| Slice: {current_slice + 1}/{current_series.num_slices}"
             )
         elif has_series:
             series_count = len(self._series_manager.available_series)
@@ -367,6 +432,34 @@ class SeriesCentricMainWindow(QMainWindow):
         
         if self._pixel_table:
             self._pixel_table.setEnabled(has_series)
+        
+        # Update navigation controls
+        self._update_navigation_controls()
+    
+    def _update_navigation_controls(self):
+        """Update navigation controls based on current series state."""
+        current_series = self._series_manager.current_series
+        
+        if current_series and current_series.num_slices > 0:
+            current_slice = self._pixel_table.current_slice if self._pixel_table else 0
+            total_slices = current_series.num_slices
+            
+            # Enable navigation controls
+            self._prev_button.setEnabled(current_slice > 0)
+            self._next_button.setEnabled(current_slice < total_slices - 1)
+            self._slice_spin.setEnabled(True)
+            
+            # Update spinbox range and value
+            self._slice_spin.setRange(1, total_slices)
+            self._slice_spin.setValue(current_slice + 1)  # Spinbox is 1-indexed
+            self._slice_info_label.setText(f"/ {total_slices}")
+            
+        else:
+            # Disable navigation controls
+            self._prev_button.setEnabled(False)
+            self._next_button.setEnabled(False)
+            self._slice_spin.setEnabled(False)
+            self._slice_info_label.setText("/ 0")
     
     def next_slice(self):
         """Navigate to next slice in all viewers."""
@@ -400,6 +493,53 @@ class SeriesCentricMainWindow(QMainWindow):
             self._volume_view.go_to_slice(index)
         if self._curve_view:
             self._curve_view.go_to_slice(index)
+        
+        # Update slice spinbox to match
+        if self._series_manager.current_series:
+            current_slice = self._pixel_table.current_slice if self._pixel_table else index
+            self._slice_spin.setValue(current_slice + 1)  # Spinbox is 1-indexed
+    
+    def _on_prev_button_clicked(self):
+        """Handle previous button click."""
+        self.prev_slice()
+    
+    def _on_next_button_clicked(self):
+        """Handle next button click."""
+        self.next_slice()
+    
+    def _on_slice_spin_changed(self, value: int):
+        """Handle slice spinbox value change."""
+        # Spinbox is 1-indexed, convert to 0-indexed
+        self.go_to_slice(value - 1)
+    
+    def _on_pixel_table_window_changed(self, x: int, y: int, width: int, height: int):
+        """Handle pixel table window changes - update curve view."""
+        if self._curve_view and hasattr(self._curve_view, '_row_spin') and self._curve_view._row_spin:
+            # Update curve view with new window data from pixel table
+            window_data = self._pixel_table.get_current_window_data()
+            if window_data and len(window_data) == 5:
+                x, y, w, h, window_array = window_data
+                # Set the curve view to use the middle row of the window
+                if w > 0 and h > 0:
+                    middle_row = y + h // 2
+                    if self._curve_view.has_series:
+                        # Update curve view to show profile for the middle row
+                        self._curve_view._row_spin.setValue(middle_row)
+    
+    def _on_pixel_selected(self, row: int, col: int):
+        """Handle pixel selection in pixel table - update curve view to show profile for selected row."""
+        if self._curve_view and hasattr(self._curve_view, '_row_spin') and self._curve_view._row_spin:
+            self._curve_view._row_spin.setValue(row)
+    
+    def _on_roi_parameters_changed(self, size: int, form: str):
+        """Handle ROI parameter changes from pixel table - sync with image viewer."""
+        if self._image_viewer and hasattr(self._image_viewer, 'cursor_size'):
+            self._image_viewer.cursor_size = size
+        if self._image_viewer and hasattr(self._image_viewer, '_roi_form'):
+            self._image_viewer._roi_form = form
+            if self._image_viewer._measurement_mode_enabled:
+                self._image_viewer._generate_measurement_overlay()
+                self._image_viewer._update_display()
     
     def keyPressEvent(self, event):
         """Handle key press events for slice navigation."""

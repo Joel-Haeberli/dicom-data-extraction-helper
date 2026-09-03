@@ -1270,6 +1270,20 @@ class SeriesCurveView(SeriesViewerWidget):
                 self._update_from_series()
         self._update_measurement_combo()
 
+    def wheelEvent(self, event):
+        """Handle wheel events for slice navigation."""
+        # Check if this is a regular wheel event (no modifiers)
+        if event.modifiers() == Qt.NoModifier:
+            # Regular wheel: Navigate slices
+            if event.angleDelta().y() > 0:
+                self.prev_slice()
+            else:
+                self.next_slice()
+            event.accept()
+        else:
+            # Pass to parent for normal scrolling behavior
+            super().wheelEvent(event)
+
 
 # For backward compatibility, create an alias
 CurveView = SeriesCurveView

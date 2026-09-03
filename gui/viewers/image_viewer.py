@@ -11,10 +11,10 @@ import numpy as np
 
 from PySide6.QtWidgets import (
     QWidget, QLabel, QCheckBox, QVBoxLayout, 
-    QScrollArea, QSizePolicy, QHBoxLayout
+    QScrollArea, QSizePolicy, QHBoxLayout, QPushButton, QSpinBox, QColorDialog
 )
 from PySide6.QtGui import QImage, QPixmap, QPalette, QBrush, QColor, QPainter, QPen
-from PySide6.QtCore import Qt, Signal, QPoint
+from PySide6.QtCore import Qt, Signal, QPoint, QEvent
 
 try:
     from gui.utils.image_utils import apply_overlay_to_base
@@ -64,6 +64,9 @@ class SeriesImageViewer(SeriesViewerWidget):
         self._overlay_image: Optional[QImage] = None
         self._show_overlay: bool = True
         
+        # External window state
+        self._external_window = None
+        
         # Measurement overlay state
         self._measurement_overlay: Optional[QImage] = None
         self._show_measurement_overlay: bool = True
@@ -80,11 +83,19 @@ class SeriesImageViewer(SeriesViewerWidget):
         # List of measurements to display
         self._displayed_measurements: List['Measurement'] = []
         
+        # Overlay color
+        self._overlay_color = (255, 0, 0)  # Default: red
+        
         # Setup UI
         self._setup_ui()
         
         # Make scroll area viewport accept focus for wheel events
         self._scroll_area.viewport().setFocusPolicy(Qt.StrongFocus)
+        self._image_label.setFocusPolicy(Qt.StrongFocus)
+        
+        # Install event filter on image label and scroll area viewport for wheel events
+        self._image_label.installEventFilter(self)
+        self._scroll_area.viewport().installEventFilter(self)
         
         # Default background
         self._update_display()
@@ -156,8 +167,43 @@ class SeriesImageViewer(SeriesViewerWidget):
         control_panel.setSpacing(8)
         control_panel.setContentsMargins(0, 0, 0, 0)
         
+        # Navigation controls
+        self._prev_button = QPushButton("←", self)
+        self._prev_button.setToolTip("Previous slice")
+        self._prev_button.setEnabled(False)
+        self._prev_button.clicked.connect(self._on_prev_slice)
+        
+        self._slice_spin = QSpinBox(self)
+        self._slice_spin.setToolTip("Current slice")
+        self._slice_spin.setEnabled(False)
+        self._slice_spin.valueChanged.connect(self._on_slice_spin_changed)
+        
+        self._next_button = QPushButton("→", self)
+        self._next_button.setToolTip("Next slice")
+        self._next_button.setEnabled(False)
+        self._next_button.clicked.connect(self._on_next_slice)
+        
+        self._slice_info_label = QLabel("/ 0", self)
+        self._slice_info_label.setStyleSheet("color: #e0e0e0;")
+        
+        # External window button
+        self._external_window_button = QPushButton("External Window", self)
+        self._external_window_button.setToolTip("Open image viewer in external window")
+        self._external_window_button.clicked.connect(self._on_external_window_clicked)
+        
+        # Overlay color button
+        self._color_button = QPushButton("Overlay Color", self)
+        self._color_button.setToolTip("Select overlay color")
+        self._color_button.clicked.connect(self._on_color_button_clicked)
+        
+        control_panel.addWidget(self._prev_button)
+        control_panel.addWidget(self._slice_spin)
+        control_panel.addWidget(self._slice_info_label)
+        control_panel.addWidget(self._next_button)
         control_panel.addWidget(self._overlay_checkbox)
+        control_panel.addWidget(self._color_button)
         control_panel.addLayout(self._measurement_controls)
+        control_panel.addWidget(self._external_window_button)
         control_panel.addStretch(1)
         
         # Add widgets to layout
@@ -172,6 +218,8 @@ class SeriesImageViewer(SeriesViewerWidget):
         else:
             self._base_image = None
         
+        self._update_navigation_controls()
+        self._load_overlay_for_current_slice()
         self._generate_measurement_overlay()
         self._update_display()
     
@@ -183,6 +231,9 @@ class SeriesImageViewer(SeriesViewerWidget):
         else:
             self._base_image = None
         
+        self._update_navigation_controls()
+        self._load_overlay_for_current_slice()
+        self._generate_measurement_overlay()
         self._update_display()
     
     def set_image(self, image: QImage):
@@ -271,7 +322,167 @@ class SeriesImageViewer(SeriesViewerWidget):
         self._show_overlay = True
         self._overlay_checkbox.setChecked(True)
         self._overlay_checkbox.setEnabled(False)
+        self._update_navigation_controls()
         self._update_display()
+    
+    def _update_navigation_controls(self):
+        """Update navigation controls based on current series state."""
+        if self.has_series and self.series.num_slices > 0:
+            total_slices = self.series.num_slices
+            
+            # Enable navigation controls
+            self._prev_button.setEnabled(self.current_slice > 0)
+            self._next_button.setEnabled(self.current_slice < total_slices - 1)
+            self._slice_spin.setEnabled(True)
+            
+            # Update spinbox range and value
+            self._slice_spin.setRange(1, total_slices)
+            self._slice_spin.setValue(self.current_slice + 1)  # Spinbox is 1-indexed
+            self._slice_info_label.setText(f"/ {total_slices}")
+            
+        else:
+            # Disable navigation controls
+            self._prev_button.setEnabled(False)
+            self._next_button.setEnabled(False)
+            self._slice_spin.setEnabled(False)
+            self._slice_info_label.setText("/ 0")
+    
+    def _on_prev_slice(self):
+        """Handle previous slice button click."""
+        self.prev_slice()
+        
+    def _on_next_slice(self):
+        """Handle next slice button click."""
+        self.next_slice()
+        
+    def _on_slice_spin_changed(self, value: int):
+        """Handle slice spinbox value change."""
+        # Spinbox is 1-indexed, convert to 0-indexed
+        self.go_to_slice(value - 1)
+    
+    def _on_external_window_clicked(self):
+        """Handle external window button click."""
+        self.open_external_window()
+    
+    def _on_color_button_clicked(self):
+        """Handle color button click."""
+        # Convert current color tuple to QColor
+        color = QColor(self._overlay_color[0], self._overlay_color[1], self._overlay_color[2])
+        
+        # Show color dialog
+        new_color = QColorDialog.getColor(color, self, "Select Overlay Color")
+        
+        if new_color.isValid():
+            self._overlay_color = (new_color.red(), new_color.green(), new_color.blue())
+            # Reload overlay with new color
+            self._load_overlay_for_current_slice()
+    
+    def _load_overlay_for_current_slice(self):
+        """Load and set overlay for the current slice."""
+        if not self.has_series or not self.current_slice_object:
+            return
+            
+        slice_obj = self.current_slice_object
+        
+        try:
+            # Check if this slice has overlay data
+            from gui.utils.image_utils import extract_overlay_with_origin, overlay_to_qimage
+            
+            overlay_data = None
+            
+            # Try to extract overlay from the slice dataset
+            if slice_obj.dataset:
+                overlay_data = extract_overlay_with_origin(slice_obj.dataset)
+            
+            if overlay_data:
+                overlay_array, origin_x, origin_y = overlay_data
+                if overlay_array is not None and overlay_array.size > 0:
+                    # Create overlay QImage
+                    base_width = self._base_image.width() if self._base_image else slice_obj.pixel_array.shape[1]
+                    base_height = self._base_image.height() if self._base_image else slice_obj.pixel_array.shape[0]
+                    
+                    overlay_qimage = overlay_to_qimage(
+                        overlay_array,
+                        base_width,
+                        base_height,
+                        color=self._overlay_color,
+                        opacity=0.7,
+                        origin_x=origin_x,
+                        origin_y=origin_y
+                    )
+                    
+                    if overlay_qimage:
+                        self.set_overlay(overlay_qimage)
+                        return
+            
+            # No overlay found
+            self.set_overlay(None)
+            
+        except Exception as e:
+            print(f"Error loading overlay: {e}")
+            self.set_overlay(None)
+    
+    def open_external_window(self):
+        """Open the image viewer in an external window."""
+        if self._external_window is None:
+            # Create external window
+            from PySide6.QtWidgets import QMainWindow
+            from PySide6.QtCore import Qt
+            
+            self._external_window = QMainWindow()
+            self._external_window.setWindowTitle("External Image Viewer")
+            self._external_window.setMinimumSize(600, 500)
+            
+            # Set the central widget to be a new instance of SeriesImageViewer
+            external_viewer = SeriesImageViewer(self._external_window, self._measurement_service)
+            external_viewer.series = self.series
+            external_viewer.current_slice = self.current_slice
+            
+            # Sync settings
+            external_viewer._show_overlay = self._show_overlay
+            external_viewer._overlay_checkbox.setChecked(self._show_overlay)
+            external_viewer._show_measurement_overlay = self._show_measurement_overlay
+            external_viewer._show_measurements_checkbox.setChecked(self._show_measurement_overlay)
+            external_viewer._measurement_mode_enabled = self._measurement_mode_enabled
+            external_viewer._measurement_mode_checkbox.setChecked(self._measurement_mode_enabled)
+            
+            # Connect signals to keep in sync
+            external_viewer.slice_changed.connect(self._sync_with_external_window)
+            self.slice_changed.connect(external_viewer._sync_with_main_viewer)
+            
+            # Connect cursor movements
+            external_viewer.cursor_moved.connect(self.set_cursor_position)
+            self.cursor_moved.connect(external_viewer.set_cursor_position)
+            
+            self._external_window.setCentralWidget(external_viewer)
+            
+            # Add close handler
+            self._external_window.destroyed.connect(self._on_external_window_closed)
+            
+            # Show the window
+            self._external_window.show()
+            
+        else:
+            # Bring existing window to front
+            self._external_window.show()
+            self._external_window.raise_()
+            self._external_window.activateWindow()
+        
+    def _sync_with_external_window(self, slice_index: int):
+        """Sync with external window slice changes."""
+        # This is called when external window changes slice
+        if self.current_slice != slice_index:
+            self.current_slice = slice_index
+            
+    def _sync_with_main_viewer(self, slice_index: int):
+        """Sync with main viewer slice changes."""
+        # This is called when main viewer changes slice
+        if self.sender() is not self:  # Avoid recursive calls
+            self.current_slice = slice_index
+            
+    def _on_external_window_closed(self):
+        """Handle external window close."""
+        self._external_window = None
     
     # Backward compatibility methods
     def set_dataset(self, ds):
@@ -584,6 +795,44 @@ class SeriesImageViewer(SeriesViewerWidget):
         """Handle key press events."""
         # Let the parent handle navigation keys
         super().keyPressEvent(event)
+
+    def eventFilter(self, obj, event):
+        """Event filter to handle wheel events on the image label and scroll area."""
+        if (obj == self._image_label or obj == self._scroll_area.viewport()) and event.type() == QEvent.Wheel:
+            self.wheelEvent(event)
+            return True
+        return super().eventFilter(obj, event)
+
+    def wheelEvent(self, event):
+        """Handle wheel events for slice navigation."""
+        # Check if this is a regular wheel event (no modifiers)
+        if event.modifiers() == Qt.NoModifier:
+            # Regular wheel: Navigate slices
+            if event.angleDelta().y() > 0:
+                self.prev_slice()
+            else:
+                self.next_slice()
+            event.accept()
+        else:
+            # Pass to parent for normal scrolling behavior
+            super().wheelEvent(event)
+
+    # Properties for easier access
+    @property
+    def cursor_size(self) -> int:
+        """Get the current cursor size."""
+        return self._cursor_size
+    
+    @cursor_size.setter
+    def cursor_size(self, size: int):
+        """Set the cursor size."""
+        if size != self._cursor_size:
+            self._cursor_size = max(1, min(size, 20))
+            if self._measurement_mode_enabled:
+                self._generate_measurement_overlay()
+                self._update_display()
+            if self._measurement_service:
+                self._measurement_service.cursor_size = self._cursor_size
 
 
 # For backward compatibility, create an alias

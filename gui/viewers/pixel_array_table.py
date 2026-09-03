@@ -814,6 +814,23 @@ class SeriesPixelArrayTable(SeriesViewerWidget):
         self._capture_button.setEnabled(enabled and self.has_series)
         self._update_cursor_display()
         self._sync_measurement_mode_to_service()
+
+    @property
+    def cursor_size(self) -> int:
+        """Get the current cursor size."""
+        return self._cursor_size
+    
+    @cursor_size.setter
+    def cursor_size(self, size: int):
+        """Set the cursor size."""
+        if size != self._cursor_size:
+            self._cursor_size = max(1, min(size, 20))
+            self._cursor_size_spin.setValue(self._cursor_size)
+            if self._measurement_mode_enabled:
+                self._update_cursor_display()
+            self.roi_parameters_changed.emit(self._cursor_size, self._roi_form)
+            if self._measurement_service:
+                self._measurement_service.cursor_size = self._cursor_size
     
     def get_measurement_mode_state(self) -> Dict[str, Any]:
         """Get the current measurement mode state."""
@@ -862,13 +879,25 @@ class SeriesPixelArrayTable(SeriesViewerWidget):
         super().keyPressEvent(event)
     
     def wheelEvent(self, event):
-        """Handle wheel events for cursor size adjustment."""
+        """Handle wheel events for cursor size adjustment and slice navigation."""
         if self._measurement_mode_enabled and event.modifiers() == Qt.ControlModifier:
             # Ctrl+Wheel: Change cursor size
             if event.angleDelta().y() > 0:
-                self.cursor_size = min(self._cursor_size + 1, 20)
+                new_size = min(self._cursor_size + 1, 20)
             else:
-                self.cursor_size = max(self._cursor_size - 1, 1)
+                new_size = max(self._cursor_size - 1, 1)
+            
+            if new_size != self._cursor_size:
+                self._cursor_size = new_size
+                self._cursor_size_spin.setValue(self._cursor_size)
+                self._on_cursor_size_changed(self._cursor_size)
+            event.accept()
+        elif event.modifiers() == Qt.NoModifier:
+            # Regular wheel: Navigate slices when not in measurement mode or without Ctrl
+            if event.angleDelta().y() > 0:
+                self.prev_slice()
+            else:
+                self.next_slice()
             event.accept()
         else:
             # Pass to parent for normal scrolling
